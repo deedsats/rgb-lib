@@ -6165,3 +6165,161 @@ fn pending_witness_txo() {
     assert!(rcv_txo.exists);
     assert!(!rcv_txo.pending_witness);
 }
+
+#[cfg(feature = "electrum")]
+#[test]
+#[parallel]
+fn blinded_change_failed_xfer() {
+    initialize();
+
+    let amount: u64 = 66;
+
+    // wallets
+    let (mut wallet_1, online_1) = get_funded_noutxo_wallet!();
+    let (mut wallet_2, online_2) = get_funded_wallet!();
+
+    // create 2 small UTXOs on wallet 1: 1 for issuance, 1 for change
+    let created = test_create_utxos(&mut wallet_1, &online_1, true, Some(2), Some(487), FEE_RATE);
+    assert_eq!(created, 2);
+
+    // issue
+    let asset = test_issue_asset_nia(&mut wallet_1, &online_1, None);
+
+    // send 1: 1 > 2 (no broadcast, fail instead)
+    show_unspent_colorings(&mut wallet_1, "wallet 1: pre send 1");
+    println!(
+        "balance 1: {:?}",
+        test_get_asset_balance(&wallet_1, &asset.asset_id)
+    );
+    let receive_data = wallet_2
+        .blind_receive(
+            None,
+            Assignment::Any,
+            Some(1), // expire early so can fail
+            TRANSPORT_ENDPOINTS.clone(),
+            MIN_CONFIRMATIONS,
+        )
+        .unwrap();
+    let recipient_map = HashMap::from([(
+        asset.asset_id.clone(),
+        vec![Recipient {
+            assignment: Assignment::Fungible(amount),
+            recipient_id: receive_data.recipient_id.clone(),
+            witness_data: None,
+            transport_endpoints: TRANSPORT_ENDPOINTS.clone(),
+        }],
+    )]);
+    // fail transfer on recipient side
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(
+        wallet_2
+            .fail_transfers(online_2.clone(), Some(1), false, false)
+            .unwrap()
+    );
+    // send
+    let txid = test_send(&mut wallet_1, &online_1, &recipient_map);
+    assert!(!txid.is_empty());
+    // fail transfer on sender side
+    assert!(
+        wallet_1
+            .fail_transfers(online_1.clone(), Some(2), false, false)
+            .unwrap()
+    );
+
+    // send 2: 1 > 2 (complete)
+    show_unspent_colorings(&mut wallet_1, "wallet 1: pre send 2");
+    println!(
+        "balance 1: {:?}",
+        test_get_asset_balance(&wallet_1, &asset.asset_id)
+    );
+    let receive_data = test_blind_receive(&wallet_2);
+    let recipient_map = HashMap::from([(
+        asset.asset_id.clone(),
+        vec![Recipient {
+            assignment: Assignment::Fungible(amount),
+            recipient_id: receive_data.recipient_id.clone(),
+            witness_data: None,
+            transport_endpoints: TRANSPORT_ENDPOINTS.clone(),
+        }],
+    )]);
+    let txid = test_send(&mut wallet_1, &online_1, &recipient_map);
+    assert!(!txid.is_empty());
+    // settle
+    wait_for_refresh(&mut wallet_2, &online_2, None, None);
+    wait_for_refresh(&mut wallet_1, &online_1, None, None);
+    mine(false, false);
+    wait_for_refresh(&mut wallet_2, &online_2, None, None);
+    wait_for_refresh(&mut wallet_1, &online_1, None, None);
+
+    // create another small UTXO on wallet 1 for blinded change
+    let created = test_create_utxos(
+        &mut wallet_1,
+        &online_1,
+        false,
+        Some(1),
+        Some(487),
+        FEE_RATE,
+    );
+    assert_eq!(created, 1);
+
+    // send 3: 1 > 2 (spend the change)
+    show_unspent_colorings(&mut wallet_1, "wallet 1: pre send 3");
+    println!(
+        "balance 1: {:?}",
+        test_get_asset_balance(&wallet_1, &asset.asset_id)
+    );
+    let receive_data = test_blind_receive(&wallet_2);
+    let recipient_map = HashMap::from([(
+        asset.asset_id.clone(),
+        vec![Recipient {
+            assignment: Assignment::Fungible(amount),
+            recipient_id: receive_data.recipient_id.clone(),
+            witness_data: None,
+            transport_endpoints: TRANSPORT_ENDPOINTS.clone(),
+        }],
+    )]);
+    let txid = test_send(&mut wallet_1, &online_1, &recipient_map);
+    assert!(!txid.is_empty());
+    // settle
+    wait_for_refresh(&mut wallet_2, &online_2, None, None);
+    wait_for_refresh(&mut wallet_1, &online_1, None, None);
+    mine(false, false);
+    wait_for_refresh(&mut wallet_2, &online_2, None, None);
+    wait_for_refresh(&mut wallet_1, &online_1, None, None);
+
+    // send 4: 2 > 1 (spend the received allocation)
+    show_unspent_colorings(&mut wallet_2, "wallet 2: pre send 4");
+    println!(
+        "balance 2: {:?}",
+        test_get_asset_balance(&wallet_2, &asset.asset_id)
+    );
+    let receive_data = test_blind_receive(&wallet_1);
+    let recipient_map = HashMap::from([(
+        asset.asset_id.clone(),
+        vec![Recipient {
+            assignment: Assignment::Fungible(amount),
+            recipient_id: receive_data.recipient_id.clone(),
+            witness_data: None,
+            transport_endpoints: TRANSPORT_ENDPOINTS.clone(),
+        }],
+    )]);
+    let txid = test_send(&mut wallet_2, &online_2, &recipient_map);
+    assert!(!txid.is_empty());
+    // settle
+    wait_for_refresh(&mut wallet_1, &online_1, None, None);
+    wait_for_refresh(&mut wallet_2, &online_2, None, None);
+    mine(false, false);
+    wait_for_refresh(&mut wallet_1, &online_1, None, None);
+    wait_for_refresh(&mut wallet_2, &online_2, None, None);
+
+    show_unspent_colorings(&mut wallet_1, "wallet 1: final");
+    println!(
+        "balance 1: {:?}",
+        test_get_asset_balance(&wallet_1, &asset.asset_id)
+    );
+    show_unspent_colorings(&mut wallet_1, "wallet 2: final");
+    println!(
+        "balance 2: {:?}",
+        test_get_asset_balance(&wallet_2, &asset.asset_id)
+    );
+}
