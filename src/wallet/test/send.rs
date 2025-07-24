@@ -6476,3 +6476,149 @@ fn blinded_change_send_begin_only() {
         test_get_asset_balance(&wallet_2, &asset.asset_id)
     );
 }
+
+#[cfg(feature = "electrum")]
+#[test]
+#[parallel]
+fn donation_recipient_nack() {
+    initialize();
+
+    let amount: u64 = 10;
+
+    // wallets
+    let (mut wallet_1, online_1) = get_funded_wallet!();
+    let (mut wallet_2, online_2) = get_funded_wallet!();
+
+    // issue
+    let asset = test_issue_asset_nia(&mut wallet_1, &online_1, None);
+
+    // send 1: 1 > 2 (donation, fail from recipient side)
+    show_unspent_colorings(&mut wallet_1, "wallet 1: pre send 1");
+    println!(
+        "balance 1: {:?}",
+        test_get_asset_balance(&wallet_1, &asset.asset_id)
+    );
+    let receive_data = wallet_2
+        .blind_receive(
+            None,
+            Assignment::Any,
+            Some(1), // expire early so can fail
+            TRANSPORT_ENDPOINTS.clone(),
+            MIN_CONFIRMATIONS,
+        )
+        .unwrap();
+    let recipient_map = HashMap::from([(
+        asset.asset_id.clone(),
+        vec![Recipient {
+            assignment: Assignment::Fungible(amount),
+            recipient_id: receive_data.recipient_id.clone(),
+            witness_data: None,
+            transport_endpoints: TRANSPORT_ENDPOINTS.clone(),
+        }],
+    )]);
+    // fail transfer on recipient side
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(
+        wallet_2
+            .fail_transfers(online_2.clone(), Some(1), false, false)
+            .unwrap()
+    );
+    // send
+    let txid = wallet_1
+        .send(
+            online_1.clone(),
+            recipient_map,
+            true,
+            FEE_RATE,
+            MIN_CONFIRMATIONS,
+            false,
+        )
+        .unwrap()
+        .txid;
+    assert!(!txid.is_empty());
+    assert!(check_test_transfer_status_sender(
+        &wallet_1,
+        &txid,
+        TransferStatus::WaitingConfirmations
+    ));
+    // manually NACK the transfer
+    wallet_2
+        .rest_client
+        .clone()
+        .post_ack(PROXY_URL, receive_data.recipient_id.clone(), false)
+        .unwrap();
+    // settle on sender side
+    mine(false, false);
+    wait_for_refresh(&mut wallet_1, &online_1, None, None);
+    assert!(check_test_transfer_status_sender(
+        &wallet_1,
+        &txid,
+        TransferStatus::Settled
+    ));
+    assert!(check_test_transfer_status_recipient(
+        &wallet_2,
+        &receive_data.recipient_id,
+        TransferStatus::Failed
+    ));
+
+    // send 2: 1 > 2 (spend change)
+    show_unspent_colorings(&mut wallet_1, "wallet 1: pre send 2");
+    println!(
+        "balance 1: {:?}",
+        test_get_asset_balance(&wallet_1, &asset.asset_id)
+    );
+    let receive_data = test_blind_receive(&wallet_2);
+    let recipient_map = HashMap::from([(
+        asset.asset_id.clone(),
+        vec![Recipient {
+            assignment: Assignment::Fungible(amount),
+            recipient_id: receive_data.recipient_id.clone(),
+            witness_data: None,
+            transport_endpoints: TRANSPORT_ENDPOINTS.clone(),
+        }],
+    )]);
+    let txid = test_send(&mut wallet_1, &online_1, &recipient_map);
+    assert!(!txid.is_empty());
+    // settle
+    wait_for_refresh(&mut wallet_2, &online_2, None, None);
+    wait_for_refresh(&mut wallet_1, &online_1, None, None);
+    mine(false, false);
+    wait_for_refresh(&mut wallet_2, &online_2, None, None);
+    wait_for_refresh(&mut wallet_1, &online_1, None, None);
+
+    // send 3: 2 > 1 (spend received allocation)
+    show_unspent_colorings(&mut wallet_2, "wallet 2: pre send 3");
+    println!(
+        "balance 2: {:?}",
+        test_get_asset_balance(&wallet_2, &asset.asset_id)
+    );
+    let receive_data = test_blind_receive(&wallet_1);
+    let recipient_map = HashMap::from([(
+        asset.asset_id.clone(),
+        vec![Recipient {
+            assignment: Assignment::Fungible(amount),
+            recipient_id: receive_data.recipient_id.clone(),
+            witness_data: None,
+            transport_endpoints: TRANSPORT_ENDPOINTS.clone(),
+        }],
+    )]);
+    let txid = test_send(&mut wallet_2, &online_2, &recipient_map);
+    assert!(!txid.is_empty());
+    // settle
+    wait_for_refresh(&mut wallet_1, &online_1, None, None);
+    wait_for_refresh(&mut wallet_2, &online_2, None, None);
+    mine(false, false);
+    wait_for_refresh(&mut wallet_1, &online_1, None, None);
+    wait_for_refresh(&mut wallet_2, &online_2, None, None);
+
+    show_unspent_colorings(&mut wallet_1, "wallet 1: final");
+    println!(
+        "balance 1: {:?}",
+        test_get_asset_balance(&wallet_1, &asset.asset_id)
+    );
+    show_unspent_colorings(&mut wallet_1, "wallet 2: final");
+    println!(
+        "balance 2: {:?}",
+        test_get_asset_balance(&wallet_2, &asset.asset_id)
+    );
+}
