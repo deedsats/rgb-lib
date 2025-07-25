@@ -525,6 +525,18 @@ impl Wallet {
         Ok(tx)
     }
 
+    fn _broadcast_and_update_rgb(
+        &mut self,
+        runtime: &mut RgbRuntime,
+        witness_id: RgbTxid,
+        signed_psbt: Psbt,
+        skip_sync: bool,
+    ) -> Result<BdkTransaction, Error> {
+        let tx = self._broadcast_psbt(signed_psbt, skip_sync)?;
+        runtime.upsert_witness(witness_id, WitnessOrd::Tentative)?;
+        Ok(tx)
+    }
+
     pub(crate) fn check_online(&self, online: Online) -> Result<(), Error> {
         if let Some(online_data) = &self.online_data {
             if online_data.id != online.id || online_data.indexer_url != online.indexer_url {
@@ -1786,14 +1798,15 @@ impl Wallet {
         {
             updated_batch_transfer.status = ActiveValue::Set(TransferStatus::Failed);
         } else if batch_transfer_transfers.iter().all(|t| t.ack == Some(true)) {
-            let transfer_dir = self.get_transfers_dir().join(
-                batch_transfer
-                    .txid
-                    .as_ref()
-                    .expect("batch transfer should have a TXID"),
-            );
+            let txid = batch_transfer
+                .txid
+                .as_ref()
+                .expect("batch transfer should have a TXID");
+            let transfer_dir = self.get_transfers_dir().join(txid);
             let signed_psbt = self._get_signed_psbt(transfer_dir)?;
-            self._broadcast_psbt(signed_psbt, skip_sync)?;
+            let mut runtime = self.rgb_runtime()?;
+            let witness_id = RgbTxid::from_str(&txid.to_string()).unwrap();
+            self._broadcast_and_update_rgb(&mut runtime, witness_id, signed_psbt, skip_sync)?;
             updated_batch_transfer.status = ActiveValue::Set(TransferStatus::WaitingConfirmations);
         } else {
             return Ok(None);
@@ -2482,6 +2495,8 @@ impl Wallet {
             consignment.save_file(self.get_send_consignment_path(asset_transfer_dir))?;
         }
 
+        runtime.upsert_witness(witness_txid, WitnessOrd::Archived)?;
+
         *psbt = Psbt::from_str(&rgb_psbt.to_string()).unwrap();
 
         // save batch transfer data to file (for send_end)
@@ -3105,7 +3120,13 @@ impl Wallet {
 
         // broadcast PSBT if donation and finally save transfer to DB
         let status = if info_contents.donation {
-            self._broadcast_psbt(psbt, skip_sync)?;
+            let mut runtime = self.rgb_runtime()?;
+            self._broadcast_and_update_rgb(
+                &mut runtime,
+                RgbTxid::from_str(&txid).unwrap(),
+                psbt,
+                skip_sync,
+            )?;
             TransferStatus::WaitingConfirmations
         } else {
             TransferStatus::WaitingCounterparty

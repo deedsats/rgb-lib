@@ -872,6 +872,16 @@ impl RgbRuntime {
             .update_witnesses(resolver, after_height, force_witnesses)
             .map_err(InternalError::from)
     }
+
+    #[cfg_attr(not(any(feature = "electrum", feature = "esplora")), allow(dead_code))]
+    pub(crate) fn upsert_witness(
+        &mut self,
+        witness_id: RgbTxid,
+        witness_ord: WitnessOrd,
+    ) -> Result<(), InternalError> {
+        self.stock.upsert_witness(witness_id, witness_ord)?;
+        Ok(())
+    }
 }
 
 impl Drop for RgbRuntime {
