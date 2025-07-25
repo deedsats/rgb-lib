@@ -311,6 +311,21 @@ fn fail() {
             .replace("{0}", invalid_ticker).replace("{1}", " ").replace("{2}", "6"))
     );
 
+    // invalid ticker: starting with a number
+    let invalid_ticker = "1TICKER";
+    let result = wallet.issue_asset_uda(
+        invalid_ticker.to_string(),
+        NAME.to_string(),
+        None,
+        PRECISION,
+        None,
+        vec![],
+    );
+    assert!(
+        matches!(result, Err(Error::InvalidTicker { details: m }) if m == IDENT_NOT_START_MSG
+            .replace("{0}", invalid_ticker).replace("{1}", "1"))
+    );
+
     // invalid name: empty
     let result = wallet.issue_asset_uda(TICKER.to_string(), s!(""), None, PRECISION, None, vec![]);
     assert!(matches!(result, Err(Error::InvalidName { details: m }) if m == EMPTY_MSG));

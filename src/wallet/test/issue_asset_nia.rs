@@ -229,6 +229,19 @@ fn fail() {
             .replace("{0}", invalid_ticker).replace("{1}", "℧").replace("{2}", "10"))
     );
 
+    // invalid ticker: starting with a number
+    let invalid_ticker = "1TICKER";
+    let result = wallet.issue_asset_nia(
+        invalid_ticker.to_string(),
+        NAME.to_string(),
+        PRECISION,
+        vec![AMOUNT],
+    );
+    assert!(
+        matches!(result, Err(Error::InvalidTicker { details: m }) if m == IDENT_NOT_START_MSG
+            .replace("{0}", invalid_ticker).replace("{1}", "1"))
+    );
+
     // invalid name: empty
     let result = wallet.issue_asset_nia(TICKER.to_string(), s!(""), PRECISION, vec![AMOUNT]);
     assert!(matches!(result, Err(Error::InvalidName { details: m }) if m == EMPTY_MSG));

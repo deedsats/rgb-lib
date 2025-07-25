@@ -63,6 +63,7 @@ const EMPTY_MSG: &str = "must contain at least one character.";
 const IDENT_EMPTY_MSG: &str = "ident must contain at least one character";
 const IDENT_TOO_LONG_MSG: &str = "string has invalid length.";
 const IDENT_NOT_ASCII_MSG: &str = "string '{0}' contains invalid character '{1}' at position {2}.";
+const IDENT_NOT_START_MSG: &str = "string '{0}' must not start with character '{1}'.";
 const RESTORE_DIR_PARTS: [&str; 3] = ["tests", "tmp", "restored"];
 const MAX_ALLOCATIONS_PER_UTXO: u32 = 5;
 const MIN_CONFIRMATIONS: u8 = 1;
