@@ -450,6 +450,21 @@ impl Wallet {
         Ok(update_res)
     }
 
+    /// Manually set the [`WitnessOrd`] of a witness TX.
+    ///
+    /// <div class="warning">This method is meant for special usage and is normally not needed, use
+    /// it only if you know what you're doing</div>
+    #[cfg(any(feature = "electrum", feature = "esplora"))]
+    pub fn upsert_witness(
+        &self,
+        witness_id: RgbTxid,
+        witness_ord: WitnessOrd,
+    ) -> Result<(), Error> {
+        let mut runtime = self.rgb_runtime()?;
+        runtime.upsert_witness(witness_id, witness_ord)?;
+        Ok(())
+    }
+
     /// Post a consignment to the proxy server.
     ///
     /// <div class="warning">This method is meant for special usage and is normally not needed, use
