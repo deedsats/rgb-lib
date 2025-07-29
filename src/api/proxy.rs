@@ -34,13 +34,6 @@ pub(crate) struct ServerInfoResponse {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub(crate) struct AckResponse {
-    pub(crate) success: bool,
-    pub(crate) ack: Option<bool>,
-    pub(crate) nack: Option<bool>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct GetConsignmentResponse {
     pub(crate) consignment: String,
     pub(crate) txid: String,
