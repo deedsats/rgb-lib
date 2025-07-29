@@ -671,11 +671,7 @@ pub(crate) fn now() -> OffsetDateTime {
 pub(crate) struct DumbResolver;
 
 impl ResolveWitness for DumbResolver {
-    fn resolve_pub_witness(&self, _: RgbTxid) -> Result<Tx, WitnessResolverError> {
-        unreachable!()
-    }
-
-    fn resolve_pub_witness_ord(&self, _: RgbTxid) -> Result<WitnessOrd, WitnessResolverError> {
+    fn resolve_witness(&self, _: RgbTxid) -> Result<WitnessStatus, WitnessResolverError> {
         unreachable!()
     }
 
@@ -715,19 +711,10 @@ impl RgbRuntime {
             witness_id: RgbTxid,
             witness_ord: WitnessOrd,
         }
-        impl ResolveWitness for FasciaResolver {
-            fn resolve_pub_witness(&self, _: RgbTxid) -> Result<Tx, WitnessResolverError> {
-                unreachable!()
-            }
-            fn resolve_pub_witness_ord(
-                &self,
-                witness_id: RgbTxid,
-            ) -> Result<WitnessOrd, WitnessResolverError> {
+        impl WitnessOrdProvider for FasciaResolver {
+            fn witness_ord(&self, witness_id: RgbTxid) -> Result<WitnessOrd, WitnessResolverError> {
                 debug_assert_eq!(witness_id, self.witness_id);
                 Ok(self.witness_ord)
-            }
-            fn check_chain_net(&self, _: ChainNet) -> Result<(), WitnessResolverError> {
-                unreachable!()
             }
         }
 
@@ -957,24 +944,17 @@ pub(crate) struct OffchainResolver<'a, 'cons, const TRANSFER: bool> {
 
 #[cfg(any(feature = "electrum", feature = "esplora"))]
 impl<const TRANSFER: bool> ResolveWitness for OffchainResolver<'_, '_, TRANSFER> {
-    fn resolve_pub_witness(&self, witness_id: RgbTxid) -> Result<Tx, WitnessResolverError> {
+    fn resolve_witness(&self, witness_id: RgbTxid) -> Result<WitnessStatus, WitnessResolverError> {
         if witness_id != self.witness_id {
-            return self.fallback.resolve_pub_witness(witness_id);
+            return self.fallback.resolve_witness(witness_id);
         }
         self.consignment
             .pub_witness(witness_id)
-            .and_then(|pw| pw.tx().cloned())
-            .ok_or(WitnessResolverError::Unknown(witness_id))
-            .or_else(|_| self.fallback.resolve_pub_witness(witness_id))
-    }
-    fn resolve_pub_witness_ord(
-        &self,
-        witness_id: RgbTxid,
-    ) -> Result<WitnessOrd, WitnessResolverError> {
-        if witness_id != self.witness_id {
-            return self.fallback.resolve_pub_witness_ord(witness_id);
-        }
-        Ok(WitnessOrd::Tentative)
+            .and_then(|p| p.tx().cloned())
+            .map_or_else(
+                || self.fallback.resolve_witness(witness_id),
+                |tx| Ok(WitnessStatus::Resolved(tx, WitnessOrd::Tentative)),
+            )
     }
     fn check_chain_net(&self, chain_net: ChainNet) -> Result<(), WitnessResolverError> {
         self.fallback.check_chain_net(chain_net)

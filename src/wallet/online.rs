@@ -1448,10 +1448,12 @@ impl Wallet {
         };
 
         debug!(self.logger, "Validating consignment...");
+        let asset_schema: AssetSchema = consignment.schema_id().try_into()?;
+        let types = asset_schema.types();
         let validation_status =
             match consignment
                 .clone()
-                .validate(&resolver, self.chain_net(), None)
+                .validate(&resolver, self.chain_net(), None, types.clone())
             {
                 Ok(consignment) => consignment.into_validation_status(),
                 Err(status) => status,
@@ -1530,7 +1532,6 @@ impl Wallet {
             return self._refuse_consignment(proxy_url, recipient_id, &mut updated_batch_transfer);
         }
 
-        let asset_schema: AssetSchema = consignment.schema_id().try_into()?;
         if !self.supports_schema(&asset_schema) {
             error!(
                 self.logger,
@@ -1551,7 +1552,7 @@ impl Wallet {
                 minimal_contract.terminals = none!();
                 let minimal_contract_validated = minimal_contract
                     .clone()
-                    .validate(self.blockchain_resolver(), self.chain_net(), None)
+                    .validate(self.blockchain_resolver(), self.chain_net(), None, types)
                     .expect("valid consignment");
                 runtime
                     .import_contract(minimal_contract_validated, self.blockchain_resolver())
@@ -1867,8 +1868,14 @@ impl Wallet {
             if let Some(tx_height) = self.get_tx_height(txid)? {
                 safe_height = Some(NonZeroU32::new(tx_height).unwrap())
             }
+            let asset_schema: AssetSchema = consignment.schema_id().try_into()?;
             let consignment = consignment
-                .validate(self.blockchain_resolver(), self.chain_net(), safe_height)
+                .validate(
+                    self.blockchain_resolver(),
+                    self.chain_net(),
+                    safe_height,
+                    asset_schema.types(),
+                )
                 .map_err(|_| InternalError::Unexpected)?;
             let mut runtime = self.rgb_runtime()?;
             let validation_status =

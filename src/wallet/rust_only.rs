@@ -342,10 +342,12 @@ impl Wallet {
         };
 
         debug!(self.logger, "Validating consignment...");
+        let asset_schema: AssetSchema = consignment.schema_id().try_into()?;
+        let types = asset_schema.types();
         let (validation_status, validated_transfer) =
             match consignment
                 .clone()
-                .validate(&resolver, self.chain_net(), None)
+                .validate(&resolver, self.chain_net(), None, types.clone())
             {
                 Ok(consignment) => (
                     consignment.clone().into_validation_status(),
@@ -366,11 +368,15 @@ impl Wallet {
         let mut minimal_contract = consignment.clone().into_contract();
         minimal_contract.bundles = none!();
         minimal_contract.terminals = none!();
-        let minimal_contract_validated =
-            match minimal_contract.validate(self.blockchain_resolver(), self.chain_net(), None) {
-                Ok(cons) => cons,
-                Err(_) => unreachable!("already passed validation"),
-            };
+        let minimal_contract_validated = match minimal_contract.validate(
+            self.blockchain_resolver(),
+            self.chain_net(),
+            None,
+            types,
+        ) {
+            Ok(cons) => cons,
+            Err(_) => unreachable!("already passed validation"),
+        };
         runtime
             .import_contract(minimal_contract_validated, self.blockchain_resolver())
             .expect("failure importing validated contract");
@@ -411,11 +417,13 @@ impl Wallet {
         let txid = RgbTxid::from_str(&txid).map_err(|_| Error::InvalidTxid)?;
         let height = match self
             .blockchain_resolver()
-            .resolve_pub_witness_ord(txid)
+            .resolve_witness(txid)
             .map_err(|e| Error::Network {
                 details: e.to_string(),
             })? {
-            WitnessOrd::Mined(witness_pos) => Some(witness_pos.height().get()),
+            WitnessStatus::Resolved(_, WitnessOrd::Mined(witness_pos)) => {
+                Some(witness_pos.height().get())
+            }
             _ => None,
         };
         info!(self.logger, "Get TX height completed");

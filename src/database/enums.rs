@@ -93,7 +93,7 @@ impl AssetSchema {
         }
     }
 
-    fn types(&self) -> TypeSystem {
+    pub(crate) fn types(&self) -> TypeSystem {
         match self {
             Self::Nia => NonInflatableAsset::types(),
             Self::Uda => UniqueDigitalAsset::types(),

@@ -111,7 +111,7 @@ use amplify::{Wrapper, bmap, confinement::Confined, s};
 use amplify::{hex::ToHex, none};
 #[cfg(any(feature = "electrum", feature = "esplora"))]
 use base64::{Engine as _, engine::general_purpose};
-use bc::{Outpoint as RgbOutpoint, ScriptPubkey, Tx};
+use bc::{Outpoint as RgbOutpoint, ScriptPubkey};
 #[cfg(feature = "electrum")]
 use bdk_electrum::{
     BdkElectrumClient,
@@ -192,7 +192,9 @@ use rgbstd::{
         MediaType, Name, ProofOfReserves as RgbProofOfReserves, RicardianContract, Ticker,
         TokenData,
     },
-    validation::{ResolveWitness, Scripts, Status, WitnessResolverError},
+    validation::{
+        ResolveWitness, Scripts, Status, WitnessOrdProvider, WitnessResolverError, WitnessStatus,
+    },
 };
 #[cfg(any(feature = "electrum", feature = "esplora"))]
 use rgbstd::{

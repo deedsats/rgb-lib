@@ -448,12 +448,14 @@ pub(crate) fn test_save_new_asset(
 
     contract.bundles = none!();
     contract.terminals = none!();
+    let asset_schema: AssetSchema = consignment.schema_id().try_into().unwrap();
     let minimal_contract_validated = contract
         .clone()
         .validate(
             rcv_wallet.blockchain_resolver(),
             rcv_wallet.chain_net(),
             None,
+            asset_schema.types(),
         )
         .unwrap();
 
