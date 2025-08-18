@@ -82,7 +82,7 @@ fn success() {
             &mut wallet_1,
             &online_1,
             Some(&asset_1.asset_id),
-            &[filter_counter_out.clone()]
+            std::slice::from_ref(&filter_counter_out)
         )
         .unwrap()
         .transfers_changed()
