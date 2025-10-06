@@ -199,6 +199,7 @@ impl LocalRecipientData {
     }
 }
 
+#[cfg(any(feature = "electrum", feature = "esplora"))]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct LocalRecipient {
     pub recipient_id: String,
