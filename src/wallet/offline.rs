@@ -9,6 +9,7 @@ const BDK_DB_NAME: &str = "bdk_db";
 
 pub(crate) const MEDIA_DIR: &str = "media_files";
 const TRANSFERS_DIR: &str = "transfers";
+const ASSETS_DIR: &str = "assets";
 
 const MIN_BTC_REQUIRED: u64 = 2000;
 
@@ -24,6 +25,8 @@ pub(crate) const DURATION_RCV_TRANSFER: u32 = 86400;
 
 pub(crate) const ASSET_ID_PREFIX: &str = "rgb:";
 pub(crate) const CONSIGNMENT_FILE: &str = "consignment_out";
+
+const CONSIGNMENT_RCV_FILE: &str = "rcv_compose.rgbc";
 
 pub(crate) const SCHEMA_ID_NIA: &str =
     "rgb:sch:RWhwUfTMpuP2Zfx1~j4nswCANGeJrYOqDcKelaMV4zU#remote-digital-pegasus";
@@ -1012,6 +1015,8 @@ pub struct Transfer {
     pub transport_endpoints: Vec<TransferTransportEndpoint>,
     /// Invoice string of the incoming transfer
     pub invoice_string: Option<String>,
+    /// Consignment path
+    pub consignment_path: Option<String>,
 }
 
 impl Transfer {
@@ -1036,6 +1041,7 @@ impl Transfer {
             expiration: td.expiration,
             transport_endpoints,
             invoice_string: x.invoice_string.clone(),
+            consignment_path: td.consignment_path,
         }
     }
 }
@@ -1235,6 +1241,7 @@ impl Wallet {
         let wallet_dir = data_dir_path.join(&wdata.master_fingerprint);
         if !wallet_dir.exists() {
             fs::create_dir(&wallet_dir)?;
+            fs::create_dir(wallet_dir.join(ASSETS_DIR))?;
             fs::create_dir(wallet_dir.join(MEDIA_DIR))?;
         }
         let (logger, _logger_guard) = setup_logger(&wallet_dir, None)?;
@@ -1372,6 +1379,19 @@ impl Wallet {
 
     pub(crate) fn get_transfers_dir(&self) -> PathBuf {
         self.wallet_dir.join(TRANSFERS_DIR)
+    }
+
+    pub(crate) fn get_transfer_dir(&self, transfer_id: &str) -> PathBuf {
+        self.get_transfers_dir().join(transfer_id)
+    }
+
+    pub(crate) fn get_asset_transfer_dir<P: AsRef<Path>>(
+        &self,
+        transfer_dir: P,
+        asset_id: &str,
+    ) -> PathBuf {
+        let asset_id_no_prefix = asset_id.replace(ASSET_ID_PREFIX, "");
+        transfer_dir.as_ref().join(&asset_id_no_prefix)
     }
 
     pub(crate) fn max_allocations_per_utxo(&self) -> u32 {
@@ -1686,6 +1706,10 @@ impl Wallet {
         BuilderSeal::from(self.get_blind_seal(outpoint))
     }
 
+    fn _get_issue_consignment_path(&self, asset_id: &str) -> PathBuf {
+        self.wallet_dir.join(ASSETS_DIR).join(asset_id)
+    }
+
     /// Issue a new RGB NIA asset with the provided `ticker`, `name`, `precision` and `amounts`,
     /// then return it.
     ///
@@ -1779,8 +1803,9 @@ impl Wallet {
         let validated_contract = builder.issue_contract().expect("failure issuing contract");
         let asset_id = validated_contract.contract_id().to_string();
         runtime
-            .import_contract(validated_contract, &DumbResolver)
+            .import_contract(validated_contract.clone(), &DumbResolver)
             .expect("failure importing issued contract");
+        validated_contract.save_file(self._get_issue_consignment_path(&asset_id))?;
 
         let asset = self.add_asset_to_db(
             asset_id.clone(),
@@ -1975,8 +2000,9 @@ impl Wallet {
         let validated_contract = builder.issue_contract().expect("failure issuing contract");
         let asset_id = validated_contract.contract_id().to_string();
         runtime
-            .import_contract(validated_contract, &DumbResolver)
+            .import_contract(validated_contract.clone(), &DumbResolver)
             .expect("failure importing issued contract");
+        validated_contract.save_file(self._get_issue_consignment_path(&asset_id))?;
 
         if let Some((_, media)) = &media_data {
             self.copy_media_and_save(media_file_path.unwrap(), media)?;
@@ -2159,8 +2185,9 @@ impl Wallet {
         let validated_contract = builder.issue_contract().expect("failure issuing contract");
         let asset_id = validated_contract.contract_id().to_string();
         runtime
-            .import_contract(validated_contract, &DumbResolver)
+            .import_contract(validated_contract.clone(), &DumbResolver)
             .expect("failure importing issued contract");
+        validated_contract.save_file(self._get_issue_consignment_path(&asset_id))?;
 
         let media_idx = if let Some(file_path) = file_path {
             let (_, media) = media_data.unwrap();
@@ -2354,8 +2381,9 @@ impl Wallet {
         let validated_contract = builder.issue_contract().expect("failure issuing contract");
         let asset_id = validated_contract.contract_id().to_string();
         runtime
-            .import_contract(validated_contract, &DumbResolver)
+            .import_contract(validated_contract.clone(), &DumbResolver)
             .expect("failure importing issued contract");
+        validated_contract.save_file(self._get_issue_consignment_path(&asset_id))?;
 
         let asset = self.add_asset_to_db(
             asset_id.clone(),
@@ -3309,6 +3337,129 @@ impl Wallet {
         Ok(transactions)
     }
 
+    pub(crate) fn normalize_recipient_id(&self, recipient_id: &str) -> String {
+        recipient_id.replace(":", "_")
+    }
+
+    pub(crate) fn get_receive_consignment_path(&self, recipient_id: &str) -> PathBuf {
+        self.get_transfers_dir()
+            .join(self.normalize_recipient_id(recipient_id))
+            .join(CONSIGNMENT_RCV_FILE)
+    }
+
+    pub(crate) fn get_transfer_data(
+        &self,
+        transfer: &DbTransfer,
+        asset_transfer: &DbAssetTransfer,
+        batch_transfer: &DbBatchTransfer,
+        txos: &[DbTxo],
+        colorings: &[DbColoring],
+    ) -> Result<TransferData, Error> {
+        let filtered_coloring = colorings
+            .iter()
+            .filter(|&c| c.asset_transfer_idx == asset_transfer.idx)
+            .cloned();
+
+        let assignments = filtered_coloring
+            .clone()
+            .filter(|c| c.r#type != ColoringType::Input)
+            .map(|c| c.assignment)
+            .collect();
+
+        let incoming = transfer.incoming;
+        let kind = if incoming {
+            if filtered_coloring.clone().count() > 0
+                && filtered_coloring
+                    .clone()
+                    .all(|c| c.r#type == ColoringType::Issue)
+            {
+                TransferKind::Issuance
+            } else {
+                match transfer.recipient_type.as_ref().unwrap() {
+                    RecipientTypeFull::Blind { .. } => TransferKind::ReceiveBlind,
+                    RecipientTypeFull::Witness { .. } => TransferKind::ReceiveWitness,
+                }
+            }
+        } else {
+            TransferKind::Send
+        };
+
+        let txo_ids: Vec<i32> = filtered_coloring.clone().map(|c| c.txo_idx).collect();
+        let transfer_txos: Vec<DbTxo> = txos
+            .iter()
+            .filter(|&t| txo_ids.contains(&t.idx))
+            .cloned()
+            .collect();
+        let receive_utxo = match &transfer.recipient_type {
+            Some(RecipientTypeFull::Blind { unblinded_utxo }) => Some(unblinded_utxo.clone()),
+            Some(RecipientTypeFull::Witness { .. }) => {
+                let received_txo_idx: Vec<i32> = filtered_coloring
+                    .clone()
+                    .filter(|c| c.r#type == ColoringType::Receive)
+                    .map(|c| c.txo_idx)
+                    .collect();
+                transfer_txos
+                    .clone()
+                    .into_iter()
+                    .filter(|t| received_txo_idx.contains(&t.idx))
+                    .map(|t| t.outpoint())
+                    .collect::<Vec<Outpoint>>()
+                    .first()
+                    .cloned()
+            }
+            _ => None,
+        };
+        let change_utxo = match kind {
+            TransferKind::ReceiveBlind | TransferKind::ReceiveWitness => None,
+            TransferKind::Send => {
+                let change_txo_idx: Vec<i32> = filtered_coloring
+                    .filter(|c| c.r#type == ColoringType::Change)
+                    .map(|c| c.txo_idx)
+                    .collect();
+                transfer_txos
+                    .into_iter()
+                    .filter(|t| change_txo_idx.contains(&t.idx))
+                    .map(|t| t.outpoint())
+                    .collect::<Vec<Outpoint>>()
+                    .first()
+                    .cloned()
+            }
+            TransferKind::Issuance => None,
+        };
+
+        let consignment_path = match (&kind, batch_transfer.status) {
+            (TransferKind::Send, _) => Some(self.get_send_consignment_path(
+                &asset_transfer.asset_id.clone().unwrap(),
+                &batch_transfer.txid.clone().unwrap(),
+            )),
+            (
+                TransferKind::ReceiveBlind | TransferKind::ReceiveWitness,
+                TransferStatus::WaitingCounterparty,
+            ) => None,
+            (TransferKind::ReceiveBlind | TransferKind::ReceiveWitness, _) => {
+                Some(self.get_receive_consignment_path(&transfer.recipient_id.clone().unwrap()))
+            }
+            (TransferKind::Issuance, _) => {
+                Some(self._get_issue_consignment_path(&asset_transfer.asset_id.clone().unwrap()))
+            }
+        }
+        .map(|p| p.to_string_lossy().to_string());
+
+        Ok(TransferData {
+            kind,
+            status: batch_transfer.status,
+            batch_transfer_idx: batch_transfer.idx,
+            assignments,
+            txid: batch_transfer.txid.clone(),
+            receive_utxo,
+            change_utxo,
+            created_at: batch_transfer.created_at,
+            updated_at: batch_transfer.updated_at,
+            expiration: batch_transfer.expiration,
+            consignment_path,
+        })
+    }
+
     /// List the RGB [`Transfer`]s known to the wallet.
     ///
     /// When an `asset_id` is not provided, return transfers that are not connected to a specific
@@ -3338,7 +3489,7 @@ impl Wallet {
                 let tte_data = self.database.get_transfer_transport_endpoints_data(t.idx)?;
                 Ok(Transfer::from_db_transfer(
                     &t,
-                    self.database.get_transfer_data(
+                    self.get_transfer_data(
                         &t,
                         &asset_transfer,
                         &batch_transfer,

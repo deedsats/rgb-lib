@@ -381,7 +381,6 @@ pub(crate) fn get_test_transfer_data(
         .related_transfers(&db_data.asset_transfers, &db_data.batch_transfers)
         .unwrap();
     let transfer_data = wallet
-        .database
         .get_transfer_data(
             transfer,
             &asset_transfer,

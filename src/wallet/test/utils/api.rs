@@ -425,7 +425,7 @@ pub(crate) fn test_save_new_asset(
 ) {
     let receive_data = test_witness_receive(rcv_wallet);
     let recipient_map = HashMap::from([(
-        asset_id.clone(),
+        asset_id.to_owned(),
         vec![Recipient {
             assignment,
             recipient_id: receive_data.recipient_id.clone(),
@@ -439,9 +439,7 @@ pub(crate) fn test_save_new_asset(
     let txid = test_send(wallet, online, &recipient_map);
     assert!(!txid.is_empty());
 
-    let txid_dir = wallet.get_transfers_dir().join(txid);
-    let asset_transfer_dir = wallet.get_asset_transfer_dir(&txid_dir, &asset_id.to_owned());
-    let consignment_path = wallet.get_send_consignment_path(asset_transfer_dir);
+    let consignment_path = wallet.get_send_consignment_path(asset_id, &txid);
 
     let consignment = RgbTransfer::load_file(consignment_path).unwrap();
     let mut contract = consignment.clone().into_contract();

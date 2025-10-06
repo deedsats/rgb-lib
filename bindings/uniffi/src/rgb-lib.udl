@@ -446,6 +446,7 @@ dictionary Transfer {
   i64? expiration;
   sequence<TransferTransportEndpoint> transport_endpoints;
   string? invoice_string;
+  string? consignment_path;
 };
 
 dictionary Unspent {

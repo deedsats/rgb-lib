@@ -4,7 +4,6 @@
 
 use super::*;
 
-const CONSIGNMENT_RCV_FILE: &str = "rcv_compose.rgbc";
 const TRANSFER_DATA_FILE: &str = "transfer_data.txt";
 const SIGNED_PSBT_FILE: &str = "signed.psbt";
 
@@ -1342,10 +1341,6 @@ impl Wallet {
         assignments
     }
 
-    fn _normalize_recipient_id(&self, recipient_id: &str) -> String {
-        recipient_id.replace(":", "_")
-    }
-
     fn _wait_consignment(
         &self,
         batch_transfer: &DbBatchTransfer,
@@ -1410,10 +1405,8 @@ impl Wallet {
         let mut updated_batch_transfer: DbBatchTransferActMod = batch_transfer.clone().into();
 
         // write consignment
-        let transfer_dir = self
-            .get_transfers_dir()
-            .join(self._normalize_recipient_id(&recipient_id));
-        let consignment_path = transfer_dir.join(CONSIGNMENT_RCV_FILE);
+        let consignment_path = self.get_receive_consignment_path(&recipient_id);
+        let transfer_dir = consignment_path.parent().unwrap();
         fs::create_dir_all(transfer_dir)?;
         let consignment_bytes = general_purpose::STANDARD
             .decode(consignment)
@@ -1855,10 +1848,7 @@ impl Wallet {
                 .recipient_id
                 .expect("transfer should have a recipient ID");
             debug!(self.logger, "Recipient ID: {recipient_id}");
-            let transfer_dir = self
-                .get_transfers_dir()
-                .join(self._normalize_recipient_id(&recipient_id));
-            let consignment_path = transfer_dir.join(CONSIGNMENT_RCV_FILE);
+            let consignment_path = self.get_receive_consignment_path(&recipient_id);
             let consignment =
                 RgbTransfer::load_file(consignment_path).map_err(InternalError::from)?;
 
@@ -2492,7 +2482,7 @@ impl Wallet {
                 beneficiaries_blinded,
                 Some(witness_txid),
             )?;
-            consignment.save_file(self.get_send_consignment_path(asset_transfer_dir))?;
+            consignment.save_file(self._get_send_consignment_path(asset_transfer_dir))?;
         }
 
         runtime.upsert_witness(witness_txid, WitnessOrd::Archived)?;
@@ -2514,6 +2504,10 @@ impl Wallet {
         Ok(())
     }
 
+    fn _get_send_consignment_path<P: AsRef<Path>>(&self, asset_transfer_dir: P) -> PathBuf {
+        asset_transfer_dir.as_ref().join(CONSIGNMENT_FILE)
+    }
+
     fn _post_transfer_data(
         &self,
         recipients: &mut Vec<LocalRecipient>,
@@ -2521,7 +2515,7 @@ impl Wallet {
         txid: String,
         medias: Vec<Media>,
     ) -> Result<(), Error> {
-        let consignment_path = self.get_send_consignment_path(&asset_transfer_dir);
+        let consignment_path = self._get_send_consignment_path(&asset_transfer_dir);
         for recipient in recipients {
             let recipient_id = &recipient.recipient_id;
             let mut found_valid = false;

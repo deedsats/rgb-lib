@@ -157,6 +157,7 @@ pub struct Transfer {
     pub expiration: Option<i64>,
     pub transport_endpoints: Vec<TransferTransportEndpoint>,
     pub invoice_string: Option<String>,
+    pub consignment_path: Option<String>,
 }
 impl From<RgbLibTransfer> for Transfer {
     fn from(orig: RgbLibTransfer) -> Self {
@@ -176,6 +177,7 @@ impl From<RgbLibTransfer> for Transfer {
             expiration: orig.expiration,
             transport_endpoints: orig.transport_endpoints,
             invoice_string: orig.invoice_string.clone(),
+            consignment_path: orig.consignment_path.clone(),
         }
     }
 }
@@ -197,6 +199,7 @@ impl From<Transfer> for RgbLibTransfer {
             expiration: orig.expiration,
             transport_endpoints: orig.transport_endpoints,
             invoice_string: orig.invoice_string.clone(),
+            consignment_path: orig.consignment_path.clone(),
         }
     }
 }

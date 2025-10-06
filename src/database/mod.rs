@@ -246,6 +246,7 @@ pub(crate) struct TransferData {
     pub(crate) created_at: i64,
     pub(crate) updated_at: i64,
     pub(crate) expiration: Option<i64>,
+    pub(crate) consignment_path: Option<String>,
 }
 
 pub struct RgbLibDatabase {
@@ -828,100 +829,6 @@ impl RgbLibDatabase {
             .first()
             .expect("transfer should be connected to an asset transfer");
         Ok((asset_transfer_data.asset_transfer.clone(), transfer.clone()))
-    }
-
-    pub(crate) fn get_transfer_data(
-        &self,
-        transfer: &DbTransfer,
-        asset_transfer: &DbAssetTransfer,
-        batch_transfer: &DbBatchTransfer,
-        txos: &[DbTxo],
-        colorings: &[DbColoring],
-    ) -> Result<TransferData, Error> {
-        let filtered_coloring = colorings
-            .iter()
-            .filter(|&c| c.asset_transfer_idx == asset_transfer.idx)
-            .cloned();
-
-        let assignments = filtered_coloring
-            .clone()
-            .filter(|c| c.r#type != ColoringType::Input)
-            .map(|c| c.assignment)
-            .collect();
-
-        let incoming = transfer.incoming;
-        let kind = if incoming {
-            if filtered_coloring.clone().count() > 0
-                && filtered_coloring
-                    .clone()
-                    .all(|c| c.r#type == ColoringType::Issue)
-            {
-                TransferKind::Issuance
-            } else {
-                match transfer.recipient_type.as_ref().unwrap() {
-                    RecipientTypeFull::Blind { .. } => TransferKind::ReceiveBlind,
-                    RecipientTypeFull::Witness { .. } => TransferKind::ReceiveWitness,
-                }
-            }
-        } else {
-            TransferKind::Send
-        };
-
-        let txo_ids: Vec<i32> = filtered_coloring.clone().map(|c| c.txo_idx).collect();
-        let transfer_txos: Vec<DbTxo> = txos
-            .iter()
-            .filter(|&t| txo_ids.contains(&t.idx))
-            .cloned()
-            .collect();
-        let receive_utxo = match &transfer.recipient_type {
-            Some(RecipientTypeFull::Blind { unblinded_utxo }) => Some(unblinded_utxo.clone()),
-            Some(RecipientTypeFull::Witness { .. }) => {
-                let received_txo_idx: Vec<i32> = filtered_coloring
-                    .clone()
-                    .filter(|c| c.r#type == ColoringType::Receive)
-                    .map(|c| c.txo_idx)
-                    .collect();
-                transfer_txos
-                    .clone()
-                    .into_iter()
-                    .filter(|t| received_txo_idx.contains(&t.idx))
-                    .map(|t| t.outpoint())
-                    .collect::<Vec<Outpoint>>()
-                    .first()
-                    .cloned()
-            }
-            _ => None,
-        };
-        let change_utxo = match kind {
-            TransferKind::ReceiveBlind | TransferKind::ReceiveWitness => None,
-            TransferKind::Send => {
-                let change_txo_idx: Vec<i32> = filtered_coloring
-                    .filter(|c| c.r#type == ColoringType::Change)
-                    .map(|c| c.txo_idx)
-                    .collect();
-                transfer_txos
-                    .into_iter()
-                    .filter(|t| change_txo_idx.contains(&t.idx))
-                    .map(|t| t.outpoint())
-                    .collect::<Vec<Outpoint>>()
-                    .first()
-                    .cloned()
-            }
-            TransferKind::Issuance => None,
-        };
-
-        Ok(TransferData {
-            kind,
-            status: batch_transfer.status,
-            batch_transfer_idx: batch_transfer.idx,
-            assignments,
-            txid: batch_transfer.txid.clone(),
-            receive_utxo,
-            change_utxo,
-            created_at: batch_transfer.created_at,
-            updated_at: batch_transfer.updated_at,
-            expiration: batch_transfer.expiration,
-        })
     }
 
     fn _get_utxo_allocations(
