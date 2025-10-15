@@ -2254,15 +2254,13 @@ impl Wallet {
             let mut asset_transition_builder =
                 runtime.transition_builder(contract_id, "transfer")?;
 
-            let mut opid_outpoints = vec![];
             let mut uda_state = None;
-            for (explicit_seal, opout_state_map) in
+            for (_explicit_seal, opout_state_map) in
                 runtime.contract_assignments_for(contract_id, prev_outputs.clone())?
             {
                 for (opout, state) in opout_state_map {
                     // there can be only a single state when contract is UDA
                     uda_state = Some(state.clone());
-                    opid_outpoints.push(explicit_seal.to_outpoint());
                     asset_transition_builder = asset_transition_builder.add_input(opout, state)?;
                 }
             }
@@ -2364,62 +2362,57 @@ impl Wallet {
             fs::write(info_file, serialized_info)?;
         }
 
-        let mut extra_state =
-            HashMap::<ContractId, HashMap<OutputSeal, HashMap<Opout, AllocatedState>>>::new();
-        for output in prev_outputs {
-            for id in runtime.contracts_assigning([output])? {
-                if transfer_info_map.contains_key(&id.to_string()) {
-                    continue;
-                }
-                let state = runtime.contract_assignments_for(id, [output])?;
-                let entry = extra_state.entry(id).or_default();
-                for (seal, assigns) in state {
-                    entry.entry(seal).or_default().extend(assigns);
-                }
+        let mut extra_state = HashMap::<ContractId, HashMap<Opout, AllocatedState>>::new();
+        for id in runtime.contracts_assigning(prev_outputs.clone())? {
+            if transfer_info_map.contains_key(&id.to_string()) {
+                continue;
+            }
+            let state = runtime.contract_assignments_for(id, prev_outputs.clone())?;
+            let entry = extra_state.entry(id).or_default();
+            for (_explicit_seal, opout_state_map) in state {
+                entry.extend(opout_state_map);
             }
         }
 
         let mut extra_allocations: HashMap<String, Vec<Assignment>> = HashMap::new();
-        for (cid, seal_map) in extra_state {
+        for (cid, opout_state_map) in extra_state {
             let schema = runtime.contract_schema(cid)?;
-            for (_explicit_seal, assigns) in seal_map {
-                for (opout, state) in assigns {
-                    let transition_type = schema.default_transition_for_assignment(&opout.ty);
-                    let mut extra_builder = runtime.transition_builder_raw(cid, transition_type)?;
-                    let assignment = match &state {
-                        AllocatedState::Amount(amt) if opout.ty == OS_ASSET => {
-                            Assignment::Fungible(amt.as_u64())
-                        }
-                        AllocatedState::Amount(amt) if opout.ty == OS_INFLATION => {
-                            Assignment::InflationRight(amt.as_u64())
-                        }
-                        AllocatedState::Data(_) => Assignment::NonFungible,
-                        AllocatedState::Void if opout.ty == OS_REPLACE => Assignment::ReplaceRight,
-                        _ => unreachable!(),
-                    };
-                    let seal = self._get_change_seal(
-                        &btc_change,
-                        &mut change_utxo_option,
-                        &mut change_utxo_idx,
-                        input_outpoints.clone(),
-                        unspents.as_slice(),
-                    )?;
-                    extra_builder = extra_builder
-                        .add_input(opout, state.clone())?
-                        .add_owned_state_raw(opout.ty, seal, state)?;
-                    let extra_transition = extra_builder.complete_transition()?;
-                    all_transitions
-                        .entry(cid)
-                        .or_default()
-                        .push(extra_transition.clone());
-                    extra_allocations
-                        .entry(cid.to_string())
-                        .or_default()
-                        .push(assignment);
-                    rgb_psbt
-                        .push_rgb_transition(extra_transition)
-                        .map_err(InternalError::from)?;
-                }
+            for (opout, state) in opout_state_map {
+                let transition_type = schema.default_transition_for_assignment(&opout.ty);
+                let mut extra_builder = runtime.transition_builder_raw(cid, transition_type)?;
+                let assignment = match &state {
+                    AllocatedState::Amount(amt) if opout.ty == OS_ASSET => {
+                        Assignment::Fungible(amt.as_u64())
+                    }
+                    AllocatedState::Amount(amt) if opout.ty == OS_INFLATION => {
+                        Assignment::InflationRight(amt.as_u64())
+                    }
+                    AllocatedState::Data(_) => Assignment::NonFungible,
+                    AllocatedState::Void if opout.ty == OS_REPLACE => Assignment::ReplaceRight,
+                    _ => unreachable!(),
+                };
+                let seal = self._get_change_seal(
+                    &btc_change,
+                    &mut change_utxo_option,
+                    &mut change_utxo_idx,
+                    input_outpoints.clone(),
+                    unspents.as_slice(),
+                )?;
+                extra_builder = extra_builder
+                    .add_input(opout, state.clone())?
+                    .add_owned_state_raw(opout.ty, seal, state)?;
+                let extra_transition = extra_builder.complete_transition()?;
+                all_transitions
+                    .entry(cid)
+                    .or_default()
+                    .push(extra_transition.clone());
+                extra_allocations
+                    .entry(cid.to_string())
+                    .or_default()
+                    .push(assignment);
+                rgb_psbt
+                    .push_rgb_transition(extra_transition)
+                    .map_err(InternalError::from)?;
             }
         }
 
