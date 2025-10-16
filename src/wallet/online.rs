@@ -39,9 +39,7 @@ impl AssignmentsCollection {
             replace: self.replace - needed.replace,
         }
     }
-}
 
-impl AssignmentsCollection {
     fn enough(&self, needed: &Self) -> bool {
         if self.fungible < needed.fungible {
             return false;
@@ -62,7 +60,8 @@ impl AssignmentsCollection {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct AssetSpend {
     txo_map: HashMap<i32, (BdkOutPoint, Vec<Assignment>)>,
-    change: AssignmentsCollection,
+    assignments_collected: AssignmentsCollection,
+    assignments_needed: AssignmentsCollection,
 }
 
 /// The result of a send operation
@@ -94,6 +93,7 @@ struct InfoBatchTransfer {
 struct InfoAssetTransfer {
     recipients: Vec<LocalRecipient>,
     asset_spend: AssetSpend,
+    change: AssignmentsCollection,
 }
 
 #[non_exhaustive]
@@ -2080,9 +2080,11 @@ impl Wallet {
             .into_iter()
             .map(|(k, v)| (k.idx, (k.outpoint().into(), v)))
             .collect();
-        let change = assignments_collected.change(&assignments_needed);
-        debug!(self.logger, "Asset change {:?}", change);
-        Ok(AssetSpend { txo_map, change })
+        Ok(AssetSpend {
+            txo_map,
+            assignments_collected,
+            assignments_needed,
+        })
     }
 
     fn _prepare_psbt(
@@ -2208,7 +2210,7 @@ impl Wallet {
     fn _prepare_rgb_psbt(
         &self,
         psbt: &mut Psbt,
-        transfer_info_map: BTreeMap<String, InfoAssetTransfer>,
+        mut transfer_info_map: BTreeMap<String, InfoAssetTransfer>,
         transfer_dir: PathBuf,
         donation: bool,
         unspents: Vec<LocalUnspent>,
@@ -2234,8 +2236,8 @@ impl Wallet {
 
         let mut all_transitions: HashMap<ContractId, Vec<Transition>> = HashMap::new();
         let mut asset_beneficiaries = bmap![];
-        for (asset_id, transfer_info) in transfer_info_map.clone() {
-            let contract_id = ContractId::from_str(&asset_id).expect("invalid contract ID");
+        for (asset_id, transfer_info) in transfer_info_map.iter_mut() {
+            let contract_id = ContractId::from_str(asset_id).expect("invalid contract ID");
             let mut asset_transition_builder =
                 runtime.transition_builder(contract_id, "transfer")?;
 
@@ -2249,37 +2251,6 @@ impl Wallet {
                     asset_transition_builder = asset_transition_builder.add_input(opout, state)?;
                 }
             }
-
-            let change = transfer_info.asset_spend.change.clone();
-            if change != AssignmentsCollection::default() {
-                let seal = self._get_change_seal(
-                    &btc_change,
-                    &mut change_utxo_option,
-                    &mut change_utxo_idx,
-                    &input_outpoints,
-                    unspents.as_slice(),
-                )?;
-                if change.fungible > 0 {
-                    asset_transition_builder = asset_transition_builder.add_fungible_state(
-                        "assetOwner",
-                        seal,
-                        change.fungible,
-                    )?;
-                }
-                if change.inflation > 0 {
-                    asset_transition_builder = asset_transition_builder.add_fungible_state(
-                        "inflationAllowance",
-                        seal,
-                        change.inflation,
-                    )?;
-                }
-                if change.replace > 0 {
-                    for _ in 0..change.replace {
-                        asset_transition_builder =
-                            asset_transition_builder.add_rights("replaceRight", seal)?;
-                    }
-                }
-            };
 
             let mut beneficiaries = vec![];
             for recipient in transfer_info.recipients.clone() {
@@ -2324,6 +2295,41 @@ impl Wallet {
                 }
             }
 
+            let change = transfer_info
+                .asset_spend
+                .assignments_collected
+                .change(&transfer_info.asset_spend.assignments_needed);
+            if change != AssignmentsCollection::default() {
+                transfer_info.change = change.clone();
+                let seal = self._get_change_seal(
+                    &btc_change,
+                    &mut change_utxo_option,
+                    &mut change_utxo_idx,
+                    &input_outpoints,
+                    unspents.as_slice(),
+                )?;
+                if change.fungible > 0 {
+                    asset_transition_builder = asset_transition_builder.add_fungible_state(
+                        "assetOwner",
+                        seal,
+                        change.fungible,
+                    )?;
+                }
+                if change.inflation > 0 {
+                    asset_transition_builder = asset_transition_builder.add_fungible_state(
+                        "inflationAllowance",
+                        seal,
+                        change.inflation,
+                    )?;
+                }
+                if change.replace > 0 {
+                    for _ in 0..change.replace {
+                        asset_transition_builder =
+                            asset_transition_builder.add_rights("replaceRight", seal)?;
+                    }
+                }
+            };
+
             let transition = asset_transition_builder.complete_transition()?;
             all_transitions
                 .entry(contract_id)
@@ -2334,7 +2340,7 @@ impl Wallet {
                 .map_err(InternalError::from)?;
             asset_beneficiaries.insert(asset_id.clone(), beneficiaries);
 
-            let asset_transfer_dir = self.get_asset_transfer_dir(&transfer_dir, &asset_id);
+            let asset_transfer_dir = self.get_asset_transfer_dir(&transfer_dir, asset_id);
             if asset_transfer_dir.is_dir() {
                 fs::remove_dir_all(&asset_transfer_dir)?;
             }
@@ -2604,6 +2610,7 @@ impl Wallet {
 
         for (asset_id, transfer_info) in transfer_info_map {
             let asset_spend = transfer_info.asset_spend;
+            let change = transfer_info.change;
             let recipients = transfer_info.recipients;
 
             let asset_transfer = DbAssetTransferActMod {
@@ -2614,7 +2621,7 @@ impl Wallet {
             };
             let asset_transfer_idx = self.database.set_asset_transfer(asset_transfer)?;
 
-            for (input_idx, (_, assignments)) in asset_spend.txo_map.clone().into_iter() {
+            for (input_idx, (_, assignments)) in asset_spend.txo_map {
                 for assignment in assignments {
                     let db_coloring = DbColoringActMod {
                         txo_idx: ActiveValue::Set(input_idx),
@@ -2626,30 +2633,28 @@ impl Wallet {
                     self.database.set_coloring(db_coloring)?;
                 }
             }
-            if asset_spend.change.fungible > 0 {
+            if change.fungible > 0 {
                 let db_coloring = DbColoringActMod {
                     txo_idx: ActiveValue::Set(change_utxo_idx.unwrap()),
                     asset_transfer_idx: ActiveValue::Set(asset_transfer_idx),
                     r#type: ActiveValue::Set(ColoringType::Change),
-                    assignment: ActiveValue::Set(Assignment::Fungible(asset_spend.change.fungible)),
+                    assignment: ActiveValue::Set(Assignment::Fungible(change.fungible)),
                     ..Default::default()
                 };
                 self.database.set_coloring(db_coloring)?;
             }
-            if asset_spend.change.inflation > 0 {
+            if change.inflation > 0 {
                 let db_coloring = DbColoringActMod {
                     txo_idx: ActiveValue::Set(change_utxo_idx.unwrap()),
                     asset_transfer_idx: ActiveValue::Set(asset_transfer_idx),
                     r#type: ActiveValue::Set(ColoringType::Change),
-                    assignment: ActiveValue::Set(Assignment::InflationRight(
-                        asset_spend.change.inflation,
-                    )),
+                    assignment: ActiveValue::Set(Assignment::InflationRight(change.inflation)),
                     ..Default::default()
                 };
                 self.database.set_coloring(db_coloring)?;
             }
-            if asset_spend.change.replace > 0 {
-                for _ in 0..asset_spend.change.replace {
+            if change.replace > 0 {
+                for _ in 0..change.replace {
                     let db_coloring = DbColoringActMod {
                         txo_idx: ActiveValue::Set(change_utxo_idx.unwrap()),
                         asset_transfer_idx: ActiveValue::Set(asset_transfer_idx),
@@ -2942,6 +2947,7 @@ impl Wallet {
             let transfer_info = InfoAssetTransfer {
                 recipients: local_recipients.clone(),
                 asset_spend,
+                change: AssignmentsCollection::default(),
             };
             transfer_info_map.insert(asset_id.clone(), transfer_info);
         }
@@ -2962,7 +2968,7 @@ impl Wallet {
         // prepare RGB PSBT
         self._prepare_rgb_psbt(
             &mut psbt,
-            transfer_info_map.clone(),
+            transfer_info_map,
             transfer_dir.clone(),
             donation,
             unspents,
