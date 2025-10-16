@@ -126,6 +126,8 @@ use bdk_esplora::{
         BlockingClient as EsploraClient, Builder as EsploraBuilder, Error as EsploraError,
     },
 };
+#[cfg(feature = "esplora")]
+use bdk_wallet::bitcoin::Txid;
 use bdk_wallet::{
     ChangeSet, KeychainKind, LocalOutput, PersistedWallet, SignOptions, Wallet as BdkWallet,
     bitcoin::{
@@ -149,7 +151,7 @@ use bdk_wallet::{
 #[cfg(any(feature = "electrum", feature = "esplora"))]
 use bdk_wallet::{
     Update,
-    bitcoin::{Transaction as BdkTransaction, Txid, blockdata::fee_rate::FeeRate},
+    bitcoin::{Transaction as BdkTransaction, blockdata::fee_rate::FeeRate},
     chain::spk_client::{FullScanRequest, FullScanResponse, SyncRequest, SyncResponse},
     coin_selection::InsufficientFunds,
 };

@@ -7,8 +7,6 @@ use super::*;
 const TRANSFER_DATA_FILE: &str = "transfer_data.txt";
 const SIGNED_PSBT_FILE: &str = "signed.psbt";
 
-const OPRET_VBYTES: u64 = 43;
-
 pub(crate) const UTXO_SIZE: u32 = 1000;
 pub(crate) const UTXO_NUM: u8 = 5;
 
@@ -63,8 +61,7 @@ impl AssignmentsCollection {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct AssetSpend {
-    txo_map: HashMap<i32, Vec<Assignment>>,
-    input_outpoints: Vec<BdkOutPoint>,
+    txo_map: HashMap<i32, (BdkOutPoint, Vec<Assignment>)>,
     change: AssignmentsCollection,
 }
 
@@ -2079,35 +2076,26 @@ impl Wallet {
             self.logger,
             "Asset input assignments {:?}", assignments_collected
         );
-        let inputs: Vec<DbTxo> = input_allocations.clone().into_keys().collect();
-        inputs
-            .iter()
-            .for_each(|t| debug!(self.logger, "Input outpoint '{}'", t.outpoint().to_string()));
-        let txo_map: HashMap<i32, Vec<Assignment>> = input_allocations
+        let txo_map: HashMap<i32, (BdkOutPoint, Vec<Assignment>)> = input_allocations
             .into_iter()
-            .map(|(k, v)| (k.idx, v))
+            .map(|(k, v)| (k.idx, (k.outpoint().into(), v)))
             .collect();
-        let input_outpoints: Vec<BdkOutPoint> = inputs.into_iter().map(BdkOutPoint::from).collect();
         let change = assignments_collected.change(&assignments_needed);
         debug!(self.logger, "Asset change {:?}", change);
-        Ok(AssetSpend {
-            txo_map,
-            input_outpoints,
-            change,
-        })
+        Ok(AssetSpend { txo_map, change })
     }
 
     fn _prepare_psbt(
         &mut self,
-        input_outpoints: Vec<BdkOutPoint>,
+        input_outpoints: HashSet<BdkOutPoint>,
         witness_recipients: &Vec<(ScriptBuf, u64)>,
         fee_rate: FeeRate,
     ) -> Result<(Psbt, Option<BtcChange>), Error> {
         let change_addr = self.get_new_address()?.script_pubkey();
         let mut builder = self.bdk_wallet.build_tx();
         builder
-            .add_data(&[])
-            .add_utxos(&input_outpoints)
+            .add_data(&[0; 32])
+            .add_utxos(&input_outpoints.into_iter().collect::<Vec<_>>())
             .map_err(InternalError::from)?
             .manually_selected_only()
             .fee_rate(fee_rate)
@@ -2150,7 +2138,7 @@ impl Wallet {
     fn _try_prepare_psbt(
         &mut self,
         input_unspents: &[LocalUnspent],
-        all_inputs: &mut Vec<BdkOutPoint>,
+        all_inputs: &mut HashSet<BdkOutPoint>,
         witness_recipients: &Vec<(ScriptBuf, u64)>,
         fee_rate: FeeRate,
     ) -> Result<(Psbt, Option<BtcChange>), Error> {
@@ -2179,7 +2167,7 @@ impl Wallet {
                         free_utxos.sort_by_key(|u| u.utxo.btc_amount.parse::<u64>().unwrap());
                     }
                     if let Some(a) = free_utxos.pop() {
-                        all_inputs.push(a.utxo.into());
+                        all_inputs.insert(a.utxo.into());
                         continue;
                     }
                     return Err(self.detect_btc_unspendable_err()?);
@@ -2194,22 +2182,14 @@ impl Wallet {
         btc_change: &Option<BtcChange>,
         change_utxo_option: &mut Option<DbTxo>,
         change_utxo_idx: &mut Option<i32>,
-        input_outpoints: Vec<OutPoint>,
+        input_outpoints: &[Outpoint],
         unspents: &[LocalUnspent],
     ) -> Result<BlindSeal<TxPtr>, Error> {
         let graph_seal = if let Some(btc_change) = btc_change {
             GraphSeal::new_random_vout(btc_change.vout)
         } else {
             if change_utxo_option.is_none() {
-                let change_utxo = self.get_utxo(
-                    &input_outpoints
-                        .into_iter()
-                        .map(Outpoint::from)
-                        .collect::<Vec<_>>(),
-                    Some(unspents),
-                    true,
-                    None,
-                )?;
+                let change_utxo = self.get_utxo(input_outpoints, Some(unspents), true, None)?;
                 debug!(
                     self.logger,
                     "Change outpoint '{}'",
@@ -2228,7 +2208,6 @@ impl Wallet {
     fn _prepare_rgb_psbt(
         &self,
         psbt: &mut Psbt,
-        input_outpoints: Vec<OutPoint>,
         transfer_info_map: BTreeMap<String, InfoAssetTransfer>,
         transfer_dir: PathBuf,
         donation: bool,
@@ -2246,6 +2225,12 @@ impl Wallet {
             .inputs()
             .map(|txin| txin.previous_outpoint)
             .collect::<HashSet<RgbOutpoint>>();
+
+        let input_outpoints: Vec<Outpoint> = prev_outputs
+            .clone()
+            .into_iter()
+            .map(Outpoint::from)
+            .collect();
 
         let mut all_transitions: HashMap<ContractId, Vec<Transition>> = HashMap::new();
         let mut asset_beneficiaries = bmap![];
@@ -2271,7 +2256,7 @@ impl Wallet {
                     &btc_change,
                     &mut change_utxo_option,
                     &mut change_utxo_idx,
-                    input_outpoints.clone(),
+                    &input_outpoints,
                     unspents.as_slice(),
                 )?;
                 if change.fungible > 0 {
@@ -2395,7 +2380,7 @@ impl Wallet {
                     &btc_change,
                     &mut change_utxo_option,
                     &mut change_utxo_idx,
-                    input_outpoints.clone(),
+                    &input_outpoints,
                     unspents.as_slice(),
                 )?;
                 extra_builder = extra_builder
@@ -2629,7 +2614,7 @@ impl Wallet {
             };
             let asset_transfer_idx = self.database.set_asset_transfer(asset_transfer)?;
 
-            for (input_idx, assignments) in asset_spend.txo_map.clone().into_iter() {
+            for (input_idx, (_, assignments)) in asset_spend.txo_map.clone().into_iter() {
                 for assignment in assignments {
                     let db_coloring = DbColoringActMod {
                         txo_idx: ActiveValue::Set(input_idx),
@@ -2962,42 +2947,21 @@ impl Wallet {
         }
 
         // prepare BDK PSBT
-        let mut all_inputs: Vec<BdkOutPoint> = transfer_info_map
+        let mut all_inputs: HashSet<BdkOutPoint> = transfer_info_map
             .values()
-            .cloned()
-            .map(|i| i.asset_spend.input_outpoints)
-            .collect::<Vec<Vec<BdkOutPoint>>>()
-            .concat();
-        all_inputs.sort();
-        all_inputs.dedup();
-        let (psbt, _) = self._try_prepare_psbt(
+            .flat_map(|ti| ti.asset_spend.txo_map.values().map(|(op, _)| *op))
+            .collect();
+        let (mut psbt, btc_change) = self._try_prepare_psbt(
             &input_unspents,
             &mut all_inputs,
             &witness_recipients,
             fee_rate_checked,
         )?;
-        let vbytes = psbt.extract_tx().map_err(InternalError::from)?.vsize() as u64;
-        let updated_fee_rate = ((vbytes + OPRET_VBYTES) / vbytes) * fee_rate;
-        let updated_fee_rate_checked = self._check_fee_rate(updated_fee_rate)?;
-        let (psbt, btc_change) = self._try_prepare_psbt(
-            &input_unspents,
-            &mut all_inputs,
-            &witness_recipients,
-            updated_fee_rate_checked,
-        )?;
-        let mut psbt = Psbt::from_str(&psbt.to_string()).unwrap();
-        let all_inputs: Vec<OutPoint> = all_inputs
-            .iter()
-            .map(|i| OutPoint {
-                txid: Txid::from_byte_array(*i.txid.as_ref()),
-                vout: i.vout,
-            })
-            .collect();
+        psbt.unsigned_tx.output[0].script_pubkey = ScriptBuf::new_op_return([]);
 
         // prepare RGB PSBT
         self._prepare_rgb_psbt(
             &mut psbt,
-            all_inputs,
             transfer_info_map.clone(),
             transfer_dir.clone(),
             donation,
