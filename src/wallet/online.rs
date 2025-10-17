@@ -1452,24 +1452,29 @@ impl Wallet {
         debug!(self.logger, "Validating consignment...");
         let asset_schema: AssetSchema = consignment.schema_id().try_into()?;
         let types = asset_schema.types();
-        let validation_status =
+        let valid_consignment =
             match consignment
                 .clone()
                 .validate(&resolver, self.chain_net(), None, types.clone())
             {
-                Ok(consignment) => consignment.into_validation_status(),
-                Err(status) => status,
+                Ok(consignment) => consignment,
+                Err(ValidationError::InvalidConsignment(e)) => {
+                    error!(self.logger, "Consignment is invalid: {}", e);
+                    return self._refuse_consignment(
+                        proxy_url,
+                        recipient_id,
+                        &mut updated_batch_transfer,
+                    );
+                }
+                Err(ValidationError::ResolverError(e)) => {
+                    warn!(self.logger, "Network error during consignment validation");
+                    return Err(Error::Network {
+                        details: e.to_string(),
+                    });
+                }
             };
-        let validity = validation_status.validity();
+        let validity = valid_consignment.validation_status().validity();
         debug!(self.logger, "Consignment validity: {:?}", validity);
-
-        if validity != Validity::Valid {
-            error!(
-                self.logger,
-                "Consignment has an invalid status: {validation_status:?}"
-            );
-            return self._refuse_consignment(proxy_url, recipient_id, &mut updated_batch_transfer);
-        }
 
         // check the info provided via the proxy is correct
         if let Some(anchored_bundle) = consignment
@@ -1566,31 +1571,21 @@ impl Wallet {
             let exists_check = self.database.check_asset_exists(asset_id.clone());
             if exists_check.is_err() {
                 // unknown asset
-                debug!(self.logger, "Registering contract...");
-                let mut minimal_contract = consignment.clone().into_contract();
-                minimal_contract.bundles = none!();
-                minimal_contract.terminals = none!();
-                let minimal_contract_validated = minimal_contract
-                    .clone()
-                    .validate(self.blockchain_resolver(), self.chain_net(), None, types)
-                    .expect("valid consignment");
-                runtime
-                    .import_contract(minimal_contract_validated, self.blockchain_resolver())
-                    .expect("failure importing received contract");
-                debug!(self.logger, "Contract registered");
+                debug!(self.logger, "Receiving unknown contract...");
+                let valid_contract = valid_consignment.into_valid_contract();
 
                 let mut attachments = vec![];
                 match asset_schema {
                     AssetSchema::Nia => {
-                        let contract =
-                            runtime.contract_wrapper::<NonInflatableAsset>(contract_id)?;
+                        let contract_data = valid_contract.contract_data();
+                        let contract = NiaWrapper::with(contract_data);
                         if let Some(attachment) = contract.contract_terms().media {
                             attachments.push(attachment)
                         }
                     }
                     AssetSchema::Uda => {
-                        let contract =
-                            runtime.contract_wrapper::<UniqueDigitalAsset>(contract_id)?;
+                        let contract_data = valid_contract.contract_data();
+                        let contract = UdaWrapper::with(contract_data);
                         let token_data = contract.token_data();
                         if let Some(media) = token_data.media {
                             attachments.push(media)
@@ -1605,15 +1600,15 @@ impl Wallet {
                         )
                     }
                     AssetSchema::Cfa => {
-                        let contract =
-                            runtime.contract_wrapper::<CollectibleFungibleAsset>(contract_id)?;
+                        let contract_data = valid_contract.contract_data();
+                        let contract = CfaWrapper::with(contract_data);
                         if let Some(attachment) = contract.contract_terms().media {
                             attachments.push(attachment)
                         }
                     }
                     AssetSchema::Ifa => {
-                        let contract =
-                            runtime.contract_wrapper::<InflatableFungibleAsset>(contract_id)?;
+                        let contract_data = valid_contract.contract_data();
+                        let contract = IfaWrapper::with(contract_data);
                         if let Some(attachment) = contract.contract_terms().media {
                             attachments.push(attachment)
                         }
@@ -1662,9 +1657,11 @@ impl Wallet {
                     }
                 }
 
-                drop(runtime);
-
-                self.save_new_asset(contract_id, Some(minimal_contract))?;
+                runtime
+                    .import_contract(valid_contract.clone(), self.blockchain_resolver())
+                    .expect("failure importing received contract");
+                debug!(self.logger, "Contract registered");
+                self.save_new_asset_internal(&runtime, contract_id, asset_schema, valid_contract)?;
             }
 
             let mut updated_asset_transfer: DbAssetTransferActMod = asset_transfer.clone().into();
@@ -1880,7 +1877,6 @@ impl Wallet {
             let validation_status =
                 runtime.accept_transfer(consignment, self.blockchain_resolver())?;
             match validation_status.validity() {
-                Validity::Invalid => return Err(InternalError::Unexpected)?,
                 Validity::Valid => {}
                 Validity::Warnings => {
                     if let Warning::UnsafeHistory(ref unsafe_history) =

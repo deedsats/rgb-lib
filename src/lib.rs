@@ -106,9 +106,9 @@ use std::{
     time::Duration,
 };
 
-use amplify::{Wrapper, bmap, confinement::Confined, s};
 #[cfg(any(feature = "electrum", feature = "esplora"))]
-use amplify::{hex::ToHex, none};
+use amplify::hex::ToHex;
+use amplify::{Wrapper, bmap, confinement::Confined, s};
 #[cfg(any(feature = "electrum", feature = "esplora"))]
 use base64::{Engine as _, engine::general_purpose};
 use bc::{Outpoint as RgbOutpoint, ScriptPubkey};
@@ -178,8 +178,6 @@ use rgb_lib_migration::{
     ArrayType, ColumnType, Migrator, MigratorTrait, Nullable, Value, ValueType, ValueTypeErr,
 };
 use rgbinvoice::{Beneficiary, RgbInvoice, RgbInvoiceBuilder, XChainNet};
-#[cfg(any(feature = "electrum", feature = "esplora"))]
-use rgbstd::indexers::AnyResolver;
 use rgbstd::{
     Allocation, Amount, ChainNet, Genesis, GraphSeal, Identity, Layer1, Operation, Opout,
     OutputSeal, OwnedFraction, Precision, Schema, SecretSeal, TokenIndex, Transition,
@@ -202,13 +200,17 @@ use rgbstd::{
 use rgbstd::{
     Assign,
     containers::IndexedConsignment,
-    validation::{Validity, Warning},
+    validation::{ValidationError, Validity, Warning},
+};
+#[cfg(any(feature = "electrum", feature = "esplora"))]
+use rgbstd::{contract::SchemaWrapper, indexers::AnyResolver};
+#[cfg(any(feature = "electrum", feature = "esplora"))]
+use schemata::{
+    CfaWrapper, IfaWrapper, NiaWrapper, OS_ASSET, OS_INFLATION, OS_REPLACE, UdaWrapper,
 };
 use schemata::{
     CollectibleFungibleAsset, InflatableFungibleAsset, NonInflatableAsset, UniqueDigitalAsset,
 };
-#[cfg(any(feature = "electrum", feature = "esplora"))]
-use schemata::{OS_ASSET, OS_INFLATION, OS_REPLACE};
 use scrypt::{
     Params, Scrypt,
     password_hash::{PasswordHasher, Salt, SaltString, rand_core::OsRng},

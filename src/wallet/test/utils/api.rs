@@ -440,34 +440,26 @@ pub(crate) fn test_save_new_asset(
     assert!(!txid.is_empty());
 
     let consignment_path = wallet.get_send_consignment_path(asset_id, &txid);
-
     let consignment = RgbTransfer::load_file(consignment_path).unwrap();
-    let mut contract = consignment.clone().into_contract();
 
-    contract.bundles = none!();
-    contract.terminals = none!();
+    let contract = consignment.clone().into_contract();
     let asset_schema: AssetSchema = consignment.schema_id().try_into().unwrap();
-    let minimal_contract_validated = contract
+    let valid_contract = contract
         .clone()
         .validate(
-            rcv_wallet.blockchain_resolver(),
+            &DumbResolver,
             rcv_wallet.chain_net(),
             None,
             asset_schema.types(),
         )
         .unwrap();
-
     let mut runtime = rcv_wallet.rgb_runtime().unwrap();
     runtime
-        .import_contract(
-            minimal_contract_validated.clone(),
-            rcv_wallet.blockchain_resolver(),
-        )
+        .import_contract(valid_contract.clone(), rcv_wallet.blockchain_resolver())
         .unwrap();
     drop(runtime);
-    rcv_wallet
-        .save_new_asset(minimal_contract_validated.contract_id(), Some(contract))
-        .unwrap();
+
+    rcv_wallet.save_new_asset(consignment).unwrap();
 }
 
 #[cfg(any(feature = "electrum", feature = "esplora"))]

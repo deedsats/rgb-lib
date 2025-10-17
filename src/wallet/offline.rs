@@ -35,7 +35,17 @@ pub(crate) const SCHEMA_ID_UDA: &str =
 pub(crate) const SCHEMA_ID_CFA: &str =
     "rgb:sch:JgqK5hJX9YBT4osCV7VcW_iLTcA5csUCnLzvaKTTrNY#mars-house-friend";
 pub(crate) const SCHEMA_ID_IFA: &str =
-    "rgb:sch:boBJfIhHYmFRFveNF5QvmyvgDVh3T5Gicqg6A~_czfY#virgo-koala-fire";
+    "rgb:sch:gmV~iQgvBidk3AR8u~_tlCqCMMBBvKMWQwW6JMWVtGA#jason-ariel-human";
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub(crate) struct LocalAssetData {
+    pub(crate) name: String,
+    pub(crate) precision: u8,
+    pub(crate) ticker: Option<String>,
+    pub(crate) details: Option<String>,
+    pub(crate) media_idx: Option<i32>,
+    pub(crate) issued_supply: u64,
+}
 
 /// The bitcoin balances (in sats) for the vanilla and colored wallets.
 ///
@@ -1819,17 +1829,20 @@ impl Wallet {
             .expect("failure importing issued contract");
         validated_contract.save_file(self._get_issue_consignment_path(&asset_id))?;
 
+        let asset_data = LocalAssetData {
+            name,
+            precision,
+            ticker: Some(ticker),
+            details: spec.details().map(|d| d.to_string()),
+            media_idx: None,
+            issued_supply: settled,
+        };
         let asset = self.add_asset_to_db(
             asset_id.clone(),
             asset_schema,
             Some(created_at),
-            spec.details().map(|d| d.to_string()),
-            settled,
-            name,
-            precision,
-            Some(ticker),
             created_at,
-            None,
+            asset_data,
         )?;
         let batch_transfer = DbBatchTransferActMod {
             status: ActiveValue::Set(TransferStatus::Settled),
@@ -2024,17 +2037,20 @@ impl Wallet {
             self.copy_media_and_save(attachment_file_path, media)?;
         }
 
+        let asset_data = LocalAssetData {
+            name,
+            precision,
+            ticker: Some(ticker),
+            details,
+            media_idx: None,
+            issued_supply: 1,
+        };
         let asset = self.add_asset_to_db(
             asset_id.clone(),
             asset_schema,
             Some(created_at),
-            details.clone(),
-            1,
-            name.clone(),
-            precision,
-            Some(ticker.clone()),
             created_at,
-            None,
+            asset_data,
         )?;
         let batch_transfer = DbBatchTransferActMod {
             status: ActiveValue::Set(TransferStatus::Settled),
@@ -2208,17 +2224,20 @@ impl Wallet {
             None
         };
 
+        let asset_data = LocalAssetData {
+            name,
+            precision,
+            ticker: None,
+            details,
+            media_idx,
+            issued_supply: settled,
+        };
         let asset = self.add_asset_to_db(
             asset_id.clone(),
             asset_schema,
             Some(created_at),
-            details,
-            settled,
-            name,
-            precision,
-            None,
             created_at,
-            media_idx,
+            asset_data,
         )?;
         let batch_transfer = DbBatchTransferActMod {
             status: ActiveValue::Set(TransferStatus::Settled),
@@ -2397,17 +2416,20 @@ impl Wallet {
             .expect("failure importing issued contract");
         validated_contract.save_file(self._get_issue_consignment_path(&asset_id))?;
 
+        let asset_data = LocalAssetData {
+            name,
+            precision,
+            ticker: Some(ticker),
+            details: spec.details().map(|d| d.to_string()),
+            media_idx: None,
+            issued_supply: settled,
+        };
         let asset = self.add_asset_to_db(
             asset_id.clone(),
             asset_schema,
             Some(created_at),
-            spec.details().map(|d| d.to_string()),
-            settled,
-            name,
-            precision,
-            Some(ticker),
             created_at,
-            None,
+            asset_data,
         )?;
         let batch_transfer = DbBatchTransferActMod {
             status: ActiveValue::Set(TransferStatus::Settled),
@@ -3036,26 +3058,21 @@ impl Wallet {
         asset_id: String,
         schema: &AssetSchema,
         added_at: Option<i64>,
-        details: Option<String>,
-        issued_supply: u64,
-        name: String,
-        precision: u8,
-        ticker: Option<String>,
         timestamp: i64,
-        media_idx: Option<i32>,
+        asset_data: LocalAssetData,
     ) -> Result<DbAsset, Error> {
         let added_at = added_at.unwrap_or_else(|| now().unix_timestamp());
         let mut db_asset = DbAssetActMod {
             idx: ActiveValue::NotSet,
-            media_idx: ActiveValue::Set(media_idx),
+            media_idx: ActiveValue::Set(asset_data.media_idx),
             id: ActiveValue::Set(asset_id),
             schema: ActiveValue::Set(*schema),
             added_at: ActiveValue::Set(added_at),
-            details: ActiveValue::Set(details),
-            issued_supply: ActiveValue::Set(issued_supply.to_string()),
-            name: ActiveValue::Set(name),
-            precision: ActiveValue::Set(precision),
-            ticker: ActiveValue::Set(ticker),
+            details: ActiveValue::Set(asset_data.details),
+            issued_supply: ActiveValue::Set(asset_data.issued_supply.to_string()),
+            name: ActiveValue::Set(asset_data.name),
+            precision: ActiveValue::Set(asset_data.precision),
+            ticker: ActiveValue::Set(asset_data.ticker),
             timestamp: ActiveValue::Set(timestamp),
         };
         let idx = self.database.set_asset(db_asset.clone())?;

@@ -758,15 +758,6 @@ impl RgbRuntime {
         ))
     }
 
-    pub(crate) fn export_contract(
-        &self,
-        contract_id: ContractId,
-    ) -> Result<Contract, InternalError> {
-        self.stock
-            .export_contract(contract_id)
-            .map_err(InternalError::from)
-    }
-
     #[cfg_attr(not(any(feature = "electrum", feature = "esplora")), allow(dead_code))]
     pub(crate) fn genesis(&self, contract_id: ContractId) -> Result<&Genesis, InternalError> {
         self.stock
@@ -835,7 +826,7 @@ impl RgbRuntime {
         witness_id: Option<RgbTxid>,
     ) -> Result<RgbTransfer, InternalError> {
         self.stock
-            .transfer(contract_id, outputs, secret_seals, witness_id)
+            .transfer(contract_id, outputs, secret_seals, [], witness_id)
             .map_err(InternalError::from)
     }
 
