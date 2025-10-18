@@ -403,10 +403,10 @@ pub(crate) fn list_transactions(
 
 pub(crate) fn list_transfers(
     wallet: &COpaqueStruct,
-    asset_id: *const c_char,
+    asset_id_opt: *const c_char,
 ) -> Result<String, Error> {
     let wallet = Wallet::from_opaque(wallet)?;
-    let asset_id = convert_optional_string(asset_id);
+    let asset_id = convert_optional_string(asset_id_opt);
     let res = wallet.list_transfers(asset_id)?;
     Ok(serde_json::to_string(&res)?)
 }
