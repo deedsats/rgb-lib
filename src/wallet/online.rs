@@ -1542,6 +1542,24 @@ impl Wallet {
             return self._refuse_consignment(proxy_url, recipient_id, &mut updated_batch_transfer);
         }
 
+        let known_concealed = if let Some(RecipientTypeFull::Blind { .. }) = transfer.recipient_type
+        {
+            let beneficiary = XChainNet::<Beneficiary>::from_str(&recipient_id)
+                .expect("saved recipient ID is invalid");
+            match beneficiary.into_inner() {
+                Beneficiary::BlindedSeal(secret_seal) => Some(secret_seal),
+                _ => unreachable!("beneficiary is blinded"),
+            }
+        } else {
+            None
+        };
+        let assignments =
+            self.extract_received_assignments(&consignment, witness_id, vout, known_concealed);
+        if assignments.is_empty() {
+            error!(self.logger, "Cannot find any receiving assignment");
+            return self._refuse_consignment(proxy_url, recipient_id, &mut updated_batch_transfer);
+        };
+
         // add asset info to transfer if missing
         if asset_transfer.asset_id.is_none() {
             // check if asset is known
@@ -1654,25 +1672,6 @@ impl Wallet {
             self.database
                 .update_asset_transfer(&mut updated_asset_transfer)?;
         }
-
-        let known_concealed = if let Some(RecipientTypeFull::Blind { .. }) = transfer.recipient_type
-        {
-            let beneficiary = XChainNet::<Beneficiary>::from_str(&recipient_id)
-                .expect("saved recipient ID is invalid");
-            match beneficiary.into_inner() {
-                Beneficiary::BlindedSeal(secret_seal) => Some(secret_seal),
-                _ => unreachable!("beneficiary is blinded"),
-            }
-        } else {
-            None
-        };
-
-        let assignments =
-            self.extract_received_assignments(&consignment, witness_id, vout, known_concealed);
-        if assignments.is_empty() {
-            error!(self.logger, "Cannot find any receiving assignment");
-            return self._refuse_consignment(proxy_url, recipient_id, &mut updated_batch_transfer);
-        };
 
         debug!(
             self.logger,
