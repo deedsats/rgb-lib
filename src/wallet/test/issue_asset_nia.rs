@@ -275,9 +275,13 @@ fn fail() {
         Err(Error::InvalidPrecision { details: m }) if m == "precision is too high"
     ));
 
-    // invalid amount list
+    // invalid amount list (no amounts)
     let result = test_issue_asset_nia_result(&mut wallet, &online, Some(&[]));
     assert!(matches!(result, Err(Error::NoIssuanceAmounts)));
+
+    // invalid amount list (1+ amounts == 0)
+    let result = test_issue_asset_nia_result(&mut wallet, &online, Some(&[1, 0, 2]));
+    assert!(matches!(result, Err(Error::InvalidAmountZero)));
 
     // new wallet
     let (mut wallet, online) = get_empty_wallet!();
