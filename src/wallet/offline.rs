@@ -2897,6 +2897,18 @@ impl Wallet {
         Ok(address.to_string())
     }
 
+    /// Return a new Bitcoin address for receiving a UTXO to hold RGB
+    /// allocations.
+    pub fn get_address_for_rgb(&mut self) -> Result<String, Error> {
+        info!(self.logger, "Getting address for RGB...");
+        let address = self.get_new_address()?;
+
+        self.update_backup_info(false)?;
+
+        info!(self.logger, "Get address for RGB completed");
+        Ok(address.to_string())
+    }
+
     /// Return the [`Balance`] for the RGB asset with the provided ID.
     pub fn get_asset_balance(&self, asset_id: String) -> Result<Balance, Error> {
         info!(self.logger, "Getting balance for asset '{}'...", asset_id);
