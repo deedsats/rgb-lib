@@ -6678,3 +6678,38 @@ fn donation_recipient_nack() {
         test_get_asset_balance(&wallet_2, &asset.asset_id)
     );
 }
+
+#[cfg(feature = "electrum")]
+#[test]
+#[parallel]
+fn send_end_without_send_begin() {
+    initialize();
+
+    let amount: u64 = 10;
+
+    // wallets
+    let (mut wallet_1, online_1) = get_funded_wallet!();
+    let (mut wallet_2, online_2) = get_funded_wallet!();
+
+    // issue
+    let asset = test_issue_asset_nia(&mut wallet_1, &online_1, None);
+
+    // send begin on wallet 1 to create PSBT
+    let receive_data = test_blind_receive(&wallet_1);
+    let recipient_map = HashMap::from([(
+        asset.asset_id.clone(),
+        vec![Recipient {
+            assignment: Assignment::Fungible(amount),
+            recipient_id: receive_data.recipient_id.clone(),
+            witness_data: None,
+            transport_endpoints: TRANSPORT_ENDPOINTS.clone(),
+        }],
+    )]);
+    let unsigned_psbt = test_send_begin_result(&mut wallet_1, &online_1, &recipient_map).unwrap();
+
+    let signed_psbt = wallet_1.sign_psbt(unsigned_psbt, None).unwrap();
+    let result = wallet_2.send_end(online_2, signed_psbt, false);
+    // TODO fails with Err(IO(No such file or directory (os error 2)))
+    // TODO assert proper error
+    assert_matches!(result, Err(Error::Internal { details: _ }));
+}
