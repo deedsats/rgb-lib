@@ -1605,11 +1605,14 @@ impl Wallet {
         })
     }
 
-    fn _get_total_issue_amount(&self, amounts: &[u64]) -> Result<u64, Error> {
-        if amounts.is_empty() {
+    fn _get_total_issue_amount(&self, amounts: &[u64], allow_empty: bool) -> Result<u64, Error> {
+        if amounts.is_empty() && !allow_empty {
             return Err(Error::NoIssuanceAmounts);
         }
         amounts.iter().try_fold(0u64, |acc, x| {
+            if *x == 0 {
+                return Err(Error::InvalidAmountZero);
+            }
             acc.checked_add(*x).ok_or(Error::TooHighIssuanceAmounts)
         })
     }
@@ -1619,12 +1622,21 @@ impl Wallet {
         inflation_amounts: &[u64],
         issued_supply: u64,
     ) -> Result<u64, Error> {
+        let total_inflation = inflation_amounts.iter().try_fold(0u64, |acc, x| {
+            if *x == 0 {
+                return Err(Error::InvalidAmountZero);
+            }
+            acc.checked_add(*x).ok_or(Error::TooHighInflationAmounts)
+        })?;
+
+        if issued_supply == 0 && total_inflation == 0 {
+            return Err(Error::NoIssuanceAmounts);
+        }
+
         if inflation_amounts.is_empty() {
             return Ok(0);
         }
-        let total_inflation = inflation_amounts.iter().try_fold(0u64, |acc, x| {
-            acc.checked_add(*x).ok_or(Error::TooHighInflationAmounts)
-        })?;
+
         issued_supply
             .checked_add(total_inflation)
             .ok_or(Error::TooHighInflationAmounts)?;
@@ -1738,7 +1750,7 @@ impl Wallet {
 
         self.check_schema_support(asset_schema)?;
 
-        let settled = self._get_total_issue_amount(&amounts)?;
+        let settled = self._get_total_issue_amount(&amounts, false)?;
 
         let db_data = self.database.get_db_data(false)?;
 
@@ -2113,7 +2125,7 @@ impl Wallet {
 
         self.check_schema_support(asset_schema)?;
 
-        let settled = self._get_total_issue_amount(&amounts)?;
+        let settled = self._get_total_issue_amount(&amounts, false)?;
 
         let db_data = self.database.get_db_data(false)?;
 
@@ -2286,7 +2298,7 @@ impl Wallet {
 
         self.check_schema_support(asset_schema)?;
 
-        let settled = self._get_total_issue_amount(&amounts)?;
+        let settled = self._get_total_issue_amount(&amounts, true)?;
         let inflation_amt = self._get_total_inflation_amount(&inflation_amounts, settled)?;
 
         let db_data = self.database.get_db_data(false)?;
