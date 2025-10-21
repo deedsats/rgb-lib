@@ -3017,6 +3017,9 @@ impl Wallet {
             .compute_txid()
             .to_string();
         let transfer_dir = self.get_transfer_dir(&txid);
+        if !transfer_dir.exists() {
+            return Err(Error::UnknownTransfer { txid });
+        }
         let psbt_out = transfer_dir.join(SIGNED_PSBT_FILE);
         fs::write(psbt_out, psbt.to_string())?;
 

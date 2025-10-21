@@ -6708,8 +6708,12 @@ fn send_end_without_send_begin() {
     let unsigned_psbt = test_send_begin_result(&mut wallet_1, &online_1, &recipient_map).unwrap();
 
     let signed_psbt = wallet_1.sign_psbt(unsigned_psbt, None).unwrap();
+    let psbt_txid = Psbt::from_str(&signed_psbt)
+        .unwrap()
+        .extract_tx()
+        .unwrap()
+        .compute_txid()
+        .to_string();
     let result = wallet_2.send_end(online_2, signed_psbt, false);
-    // TODO fails with Err(IO(No such file or directory (os error 2)))
-    // TODO assert proper error
-    assert_matches!(result, Err(Error::Internal { details: _ }));
+    assert_matches!(result, Err(Error::UnknownTransfer { txid }) if txid == psbt_txid);
 }
