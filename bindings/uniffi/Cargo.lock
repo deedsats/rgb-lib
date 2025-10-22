@@ -3322,6 +3322,7 @@ dependencies = [
  "commit_verify",
  "file-format",
  "futures",
+ "generic-array",
  "hex",
  "rand 0.9.1",
  "reqwest",
