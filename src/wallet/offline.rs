@@ -2533,7 +2533,33 @@ impl Wallet {
 
         let invoice = invoice_builder.finish();
         let invoice_string = invoice.to_string();
+        let batch_transfer_idx = self.write_invoice_to_db(
+            asset_id,
+            detected_assignment,
+            expiry,
+            created_at,
+            endpoints,
+            min_confirmations,
+            &recipient_id,
+            recipient_type,
+            &invoice_string
+        )?;
+        Ok((recipient_id, invoice_string, expiry, batch_transfer_idx))
+    }
 
+    pub fn write_invoice_to_db(
+        &self,
+        asset_id: Option<String>,
+        detected_assignment: Assignment,
+        expiry: Option<i64>,
+        created_at: i64,
+        endpoints: Vec<String>,
+        min_confirmations: u8,
+        recipient_id: &String,
+        recipient_type: RecipientTypeFull,
+        invoice_string: &String,
+    ) -> Result<i32, Error> {
+        println!("write_invoice_to_db: endpoints: {:?}", endpoints);
         let batch_transfer = DbBatchTransferActMod {
             status: ActiveValue::Set(TransferStatus::WaitingCounterparty),
             expiration: ActiveValue::Set(expiry),
@@ -2570,8 +2596,7 @@ impl Wallet {
                 },
             )?;
         }
-
-        Ok((recipient_id, invoice_string, expiry, batch_transfer_idx))
+        Ok(transfer_idx)
     }
 
     /// Blind an UTXO to receive RGB assets and return the resulting [`ReceiveData`].
@@ -2899,14 +2924,20 @@ impl Wallet {
 
     /// Return a new Bitcoin address for receiving a UTXO to hold RGB
     /// allocations.
-    pub fn get_address_for_rgb(&mut self) -> Result<String, Error> {
+    pub fn get_address_for_rgb(&mut self) -> Result<BdkAddress, Error> {
         info!(self.logger, "Getting address for RGB...");
         let address = self.get_new_address()?;
 
+        let script_pubkey = address.script_pubkey();
+        self.database
+            .set_pending_witness_script(DbPendingWitnessScriptActMod {
+                script: ActiveValue::Set(script_pubkey.to_hex_string()),
+                ..Default::default()
+            })?;
         self.update_backup_info(false)?;
 
         info!(self.logger, "Get address for RGB completed");
-        Ok(address.to_string())
+        Ok(address)
     }
 
     /// Return the [`Balance`] for the RGB asset with the provided ID.

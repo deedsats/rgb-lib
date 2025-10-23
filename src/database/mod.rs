@@ -1018,4 +1018,4 @@ impl RgbLibDatabase {
     }
 }
 
-pub(crate) mod enums;
+pub mod enums;

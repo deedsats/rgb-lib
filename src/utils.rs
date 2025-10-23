@@ -437,7 +437,7 @@ pub fn script_buf_from_recipient_id(recipient_id: String) -> Result<Option<Scrip
     }
 }
 
-pub(crate) fn beneficiary_from_script_buf(script_buf: ScriptBuf) -> Beneficiary {
+pub fn beneficiary_from_script_buf(script_buf: ScriptBuf) -> Beneficiary {
     let address_payload =
         AddressPayload::from_script(&ScriptPubkey::try_from(script_buf.into_bytes()).unwrap())
             .unwrap();

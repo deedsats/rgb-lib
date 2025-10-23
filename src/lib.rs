@@ -60,7 +60,7 @@
 //! ```
 
 pub(crate) mod api;
-pub(crate) mod database;
+pub mod database;
 pub(crate) mod error;
 pub mod keys;
 pub mod utils;
