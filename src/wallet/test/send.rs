@@ -3616,7 +3616,8 @@ fn insufficient_allocations_success() {
 fn send_to_oneself() {
     initialize();
 
-    let amount: u64 = 66;
+    let amount_1: u64 = 66;
+    let amount_2: u64 = 33;
 
     // wallets
     let (mut wallet, online) = get_funded_wallet!();
@@ -3625,15 +3626,27 @@ fn send_to_oneself() {
     let asset = test_issue_asset_nia(&mut wallet, &online, None);
 
     // send
-    let receive_data = test_blind_receive(&wallet);
+    let receive_data_1 = test_blind_receive(&wallet);
+    let receive_data_2 = test_witness_receive(&mut wallet);
     let recipient_map = HashMap::from([(
         asset.asset_id,
-        vec![Recipient {
-            assignment: Assignment::Fungible(amount),
-            recipient_id: receive_data.recipient_id.clone(),
-            witness_data: None,
-            transport_endpoints: TRANSPORT_ENDPOINTS.clone(),
-        }],
+        vec![
+            Recipient {
+                assignment: Assignment::Fungible(amount_1),
+                recipient_id: receive_data_1.recipient_id.clone(),
+                witness_data: None,
+                transport_endpoints: TRANSPORT_ENDPOINTS.clone(),
+            },
+            Recipient {
+                assignment: Assignment::Fungible(amount_2),
+                recipient_id: receive_data_2.recipient_id.clone(),
+                witness_data: Some(WitnessData {
+                    amount_sat: 1000,
+                    blinding: None,
+                }),
+                transport_endpoints: TRANSPORT_ENDPOINTS.clone(),
+            },
+        ],
     )]);
     let txid = test_send(&mut wallet, &online, &recipient_map);
     assert!(!txid.is_empty());
@@ -3644,11 +3657,54 @@ fn send_to_oneself() {
     wait_for_refresh(&mut wallet, &online, None, None);
 
     let batch_transfers = get_test_batch_transfers(&wallet, &txid);
-    assert_eq!(batch_transfers.len(), 2);
+    assert_eq!(batch_transfers.len(), 3);
     assert!(
         batch_transfers
             .iter()
             .all(|t| t.status == TransferStatus::Settled)
+    );
+
+    // check balance is unchanged
+    let nia_assets = test_list_assets(&wallet, &[AssetSchema::Nia]).nia.unwrap();
+    let asset = nia_assets.first().unwrap();
+    assert_eq!(
+        asset.balance,
+        Balance {
+            settled: AMOUNT,
+            future: AMOUNT,
+            spendable: AMOUNT,
+        }
+    );
+
+    let transfers = test_list_transfers(&wallet, Some(&asset.asset_id));
+    assert_eq!(transfers.len(), 5);
+    assert_eq!(
+        transfers
+            .iter()
+            .filter(|t| t.kind == TransferKind::Issuance)
+            .count(),
+        1
+    );
+    assert_eq!(
+        transfers
+            .iter()
+            .filter(|t| t.kind == TransferKind::Send)
+            .count(),
+        2
+    );
+    assert_eq!(
+        transfers
+            .iter()
+            .filter(|t| t.kind == TransferKind::ReceiveBlind)
+            .count(),
+        1
+    );
+    assert_eq!(
+        transfers
+            .iter()
+            .filter(|t| t.kind == TransferKind::ReceiveWitness)
+            .count(),
+        1
     );
 }
 
@@ -6621,4 +6677,43 @@ fn donation_recipient_nack() {
         "balance 2: {:?}",
         test_get_asset_balance(&wallet_2, &asset.asset_id)
     );
+}
+
+#[cfg(feature = "electrum")]
+#[test]
+#[parallel]
+fn send_end_without_send_begin() {
+    initialize();
+
+    let amount: u64 = 10;
+
+    // wallets
+    let (mut wallet_1, online_1) = get_funded_wallet!();
+    let (mut wallet_2, online_2) = get_funded_wallet!();
+
+    // issue
+    let asset = test_issue_asset_nia(&mut wallet_1, &online_1, None);
+
+    // send begin on wallet 1 to create PSBT
+    let receive_data = test_blind_receive(&wallet_1);
+    let recipient_map = HashMap::from([(
+        asset.asset_id.clone(),
+        vec![Recipient {
+            assignment: Assignment::Fungible(amount),
+            recipient_id: receive_data.recipient_id.clone(),
+            witness_data: None,
+            transport_endpoints: TRANSPORT_ENDPOINTS.clone(),
+        }],
+    )]);
+    let unsigned_psbt = test_send_begin_result(&mut wallet_1, &online_1, &recipient_map).unwrap();
+
+    let signed_psbt = wallet_1.sign_psbt(unsigned_psbt, None).unwrap();
+    let psbt_txid = Psbt::from_str(&signed_psbt)
+        .unwrap()
+        .extract_tx()
+        .unwrap()
+        .compute_txid()
+        .to_string();
+    let result = wallet_2.send_end(online_2, signed_psbt, false);
+    assert_matches!(result, Err(Error::UnknownTransfer { txid }) if txid == psbt_txid);
 }

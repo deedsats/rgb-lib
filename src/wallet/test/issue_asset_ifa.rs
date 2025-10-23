@@ -78,6 +78,49 @@ fn success() {
 #[cfg(feature = "electrum")]
 #[test]
 #[parallel]
+fn noissue_someinflation() {
+    initialize();
+
+    let (mut wallet, online) = get_funded_wallet!();
+
+    let asset = test_issue_asset_ifa(&mut wallet, &online, Some(&[]), Some(&[AMOUNT]), 0);
+
+    // checks
+    let balance = test_get_asset_balance(&wallet, &asset.asset_id);
+    assert_eq!(asset.issued_supply, 0);
+    assert_eq!(
+        balance,
+        Balance {
+            settled: 0,
+            future: 0,
+            spendable: 0,
+        }
+    );
+    let unspents = test_list_unspents(&mut wallet, None, false);
+    let unspents_asset = unspents.iter().filter(|u| {
+        u.rgb_allocations
+            .iter()
+            .any(|a| a.asset_id == Some(asset.asset_id.clone()))
+    });
+    assert_eq!(unspents_asset.clone().count(), 1);
+    let unspents_inflation = unspents_asset.filter(|u| {
+        u.rgb_allocations
+            .iter()
+            .all(|a| a.assignment == Assignment::InflationRight(AMOUNT))
+    });
+    let allocations_inflation = unspents_inflation
+        .filter(|u| {
+            u.rgb_allocations
+                .iter()
+                .all(|a| a.assignment == Assignment::InflationRight(AMOUNT))
+        })
+        .flat_map(|u| u.rgb_allocations.clone());
+    assert_eq!(allocations_inflation.count(), 1);
+}
+
+#[cfg(feature = "electrum")]
+#[test]
+#[parallel]
 fn multi_success() {
     initialize();
 
@@ -415,9 +458,18 @@ fn fail() {
         Err(Error::InvalidPrecision { details: m }) if m == "precision is too high"
     ));
 
-    // invalid amount list
-    let result = test_issue_asset_ifa_result(&mut wallet, &online, Some(&[]), None, 0);
+    // invalid amount list (no issuance nor inflation amounts)
+    let result = test_issue_asset_ifa_result(&mut wallet, &online, Some(&[]), Some(&[]), 0);
     assert!(matches!(result, Err(Error::NoIssuanceAmounts)));
+
+    // invalid amount list (1+ issuance amounts == 0)
+    let result = test_issue_asset_ifa_result(&mut wallet, &online, Some(&[1, 0, 2]), None, 0);
+    assert!(matches!(result, Err(Error::InvalidAmountZero)));
+
+    // invalid amount list (1+ inflation amounts == 0)
+    let result =
+        test_issue_asset_ifa_result(&mut wallet, &online, Some(&[AMOUNT]), Some(&[1, 0, 2]), 0);
+    assert!(matches!(result, Err(Error::InvalidAmountZero)));
 
     // new wallet
     let (mut wallet, online) = get_empty_wallet!();

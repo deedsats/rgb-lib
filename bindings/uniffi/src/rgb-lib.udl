@@ -81,6 +81,7 @@ interface RgbLibError {
   TooHighInflationAmounts();
   TooHighIssuanceAmounts();
   UnknownRgbSchema(string schema_id);
+  UnknownTransfer(string txid);
   UnsupportedBackupVersion(string version);
   UnsupportedLayer1(string layer_1);
   UnsupportedSchema(AssetSchema asset_schema);
@@ -446,6 +447,7 @@ dictionary Transfer {
   i64? expiration;
   sequence<TransferTransportEndpoint> transport_endpoints;
   string? invoice_string;
+  string? consignment_path;
 };
 
 dictionary Unspent {

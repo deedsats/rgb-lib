@@ -420,6 +420,13 @@ pub enum Error {
         schema_id: String,
     },
 
+    /// The detected transfer is unknown
+    #[error("Unknown transfer: {txid}")]
+    UnknownTransfer {
+        /// Transfer TXID
+        txid: String,
+    },
+
     /// The backup version is not supported
     #[error("Backup version not supported")]
     UnsupportedBackupVersion {

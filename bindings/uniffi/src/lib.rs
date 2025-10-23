@@ -157,6 +157,7 @@ pub struct Transfer {
     pub expiration: Option<i64>,
     pub transport_endpoints: Vec<TransferTransportEndpoint>,
     pub invoice_string: Option<String>,
+    pub consignment_path: Option<String>,
 }
 impl From<RgbLibTransfer> for Transfer {
     fn from(orig: RgbLibTransfer) -> Self {
@@ -176,6 +177,7 @@ impl From<RgbLibTransfer> for Transfer {
             expiration: orig.expiration,
             transport_endpoints: orig.transport_endpoints,
             invoice_string: orig.invoice_string.clone(),
+            consignment_path: orig.consignment_path.clone(),
         }
     }
 }
@@ -197,6 +199,7 @@ impl From<Transfer> for RgbLibTransfer {
             expiration: orig.expiration,
             transport_endpoints: orig.transport_endpoints,
             invoice_string: orig.invoice_string.clone(),
+            consignment_path: orig.consignment_path.clone(),
         }
     }
 }
@@ -251,7 +254,7 @@ impl RecipientInfo {
         })
     }
 
-    fn _get_recipient_info(&self) -> RwLockReadGuard<RgbLibRecipientInfo> {
+    fn _get_recipient_info(&self) -> RwLockReadGuard<'_, RgbLibRecipientInfo> {
         self.recipient_info.read().expect("recipient_info")
     }
 
@@ -275,7 +278,7 @@ impl TransportEndpoint {
         })
     }
 
-    fn _get_transport_endpoint(&self) -> RwLockReadGuard<RgbLibTransportEndpoint> {
+    fn _get_transport_endpoint(&self) -> RwLockReadGuard<'_, RgbLibTransportEndpoint> {
         self.transport_endpoint.read().expect("transport_endpoint")
     }
 
@@ -307,7 +310,7 @@ impl Invoice {
         })
     }
 
-    fn _get_invoice(&self) -> RwLockReadGuard<RgbLibInvoice> {
+    fn _get_invoice(&self) -> RwLockReadGuard<'_, RgbLibInvoice> {
         self.invoice.read().expect("invoice")
     }
 
@@ -331,7 +334,7 @@ impl Wallet {
         })
     }
 
-    fn _get_wallet(&self) -> MutexGuard<RgbLibWallet> {
+    fn _get_wallet(&self) -> MutexGuard<'_, RgbLibWallet> {
         self.wallet_mutex.lock().expect("wallet")
     }
 

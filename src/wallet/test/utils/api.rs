@@ -425,7 +425,7 @@ pub(crate) fn test_save_new_asset(
 ) {
     let receive_data = test_witness_receive(rcv_wallet);
     let recipient_map = HashMap::from([(
-        asset_id.clone(),
+        asset_id.to_owned(),
         vec![Recipient {
             assignment,
             recipient_id: receive_data.recipient_id.clone(),
@@ -439,37 +439,27 @@ pub(crate) fn test_save_new_asset(
     let txid = test_send(wallet, online, &recipient_map);
     assert!(!txid.is_empty());
 
-    let txid_dir = wallet.get_transfers_dir().join(txid);
-    let asset_transfer_dir = wallet.get_asset_transfer_dir(&txid_dir, &asset_id.to_owned());
-    let consignment_path = wallet.get_send_consignment_path(asset_transfer_dir);
-
+    let consignment_path = wallet.get_send_consignment_path(asset_id, &txid);
     let consignment = RgbTransfer::load_file(consignment_path).unwrap();
-    let mut contract = consignment.clone().into_contract();
 
-    contract.bundles = none!();
-    contract.terminals = none!();
+    let contract = consignment.clone().into_contract();
     let asset_schema: AssetSchema = consignment.schema_id().try_into().unwrap();
-    let minimal_contract_validated = contract
+    let valid_contract = contract
         .clone()
         .validate(
-            rcv_wallet.blockchain_resolver(),
+            &DumbResolver,
             rcv_wallet.chain_net(),
             None,
             asset_schema.types(),
         )
         .unwrap();
-
     let mut runtime = rcv_wallet.rgb_runtime().unwrap();
     runtime
-        .import_contract(
-            minimal_contract_validated.clone(),
-            rcv_wallet.blockchain_resolver(),
-        )
+        .import_contract(valid_contract.clone(), rcv_wallet.blockchain_resolver())
         .unwrap();
     drop(runtime);
-    rcv_wallet
-        .save_new_asset(minimal_contract_validated.contract_id(), Some(contract))
-        .unwrap();
+
+    rcv_wallet.save_new_asset(consignment).unwrap();
 }
 
 #[cfg(any(feature = "electrum", feature = "esplora"))]

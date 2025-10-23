@@ -244,9 +244,9 @@ pub extern "C" fn rgblib_list_transactions(
 #[unsafe(no_mangle)]
 pub extern "C" fn rgblib_list_transfers(
     wallet: &COpaqueStruct,
-    asset_id: *const c_char,
+    asset_id_opt: *const c_char,
 ) -> CResultString {
-    list_transfers(wallet, asset_id).into()
+    list_transfers(wallet, asset_id_opt).into()
 }
 
 #[unsafe(no_mangle)]

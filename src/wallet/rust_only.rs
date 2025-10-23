@@ -344,47 +344,35 @@ impl Wallet {
         debug!(self.logger, "Validating consignment...");
         let asset_schema: AssetSchema = consignment.schema_id().try_into()?;
         let types = asset_schema.types();
-        let (validation_status, validated_transfer) =
+        let valid_consignment =
             match consignment
                 .clone()
                 .validate(&resolver, self.chain_net(), None, types.clone())
             {
-                Ok(consignment) => (
-                    consignment.clone().into_validation_status(),
-                    Some(consignment),
-                ),
-                Err(status) => (status, None),
+                Ok(consignment) => consignment,
+                Err(ValidationError::InvalidConsignment(e)) => {
+                    error!(self.logger, "Consignment is invalid: {}", e);
+                    return Err(Error::InvalidConsignment);
+                }
+                Err(ValidationError::ResolverError(e)) => {
+                    warn!(self.logger, "Network error during consignment validation");
+                    return Err(Error::Network {
+                        details: e.to_string(),
+                    });
+                }
             };
-        let validity = validation_status.validity();
+        let validity = valid_consignment.validation_status().validity();
         debug!(self.logger, "Consignment validity: {:?}", validity);
-        if validity != Validity::Valid {
-            error!(
-                self.logger,
-                "Consignment has an invalid status: {validation_status:?}"
-            );
-            return Err(Error::InvalidConsignment);
-        }
 
-        let mut minimal_contract = consignment.clone().into_contract();
-        minimal_contract.bundles = none!();
-        minimal_contract.terminals = none!();
-        let minimal_contract_validated = match minimal_contract.validate(
-            self.blockchain_resolver(),
-            self.chain_net(),
-            None,
-            types,
-        ) {
-            Ok(cons) => cons,
-            Err(_) => unreachable!("already passed validation"),
-        };
+        let valid_contract = valid_consignment.clone().into_valid_contract();
         runtime
-            .import_contract(minimal_contract_validated, self.blockchain_resolver())
+            .import_contract(valid_contract, self.blockchain_resolver())
             .expect("failure importing validated contract");
 
         let received_rgb_assignments =
             self.extract_received_assignments(&consignment, witness_id, Some(vout), None);
 
-        let _status = runtime.accept_transfer(validated_transfer.unwrap(), &resolver)?;
+        let _status = runtime.accept_transfer(valid_consignment, &resolver)?;
 
         info!(self.logger, "Accept transfer completed");
         Ok((consignment, received_rgb_assignments))
@@ -509,139 +497,127 @@ impl Wallet {
         Ok(())
     }
 
-    /// Extract the metadata of a new RGB asset and save the asset into the DB.
-    ///
-    /// <div class="warning">This method is meant for special usage and is normally not needed, use
-    /// it only if you know what you're doing</div>
-    pub fn save_new_asset(
+    pub(crate) fn save_new_asset_internal(
         &self,
+        runtime: &RgbRuntime,
         contract_id: ContractId,
-        contract: Option<Contract>,
+        asset_schema: AssetSchema,
+        valid_contract: ValidContract,
     ) -> Result<(), Error> {
-        info!(self.logger, "Saving new asset...");
-        let runtime = self.rgb_runtime()?;
-        let contract = if let Some(contract) = contract {
-            contract
-        } else {
-            runtime.export_contract(contract_id)?
+        let timestamp = valid_contract.genesis.timestamp;
+        let (local_asset_data, token) = match &asset_schema {
+            AssetSchema::Nia => {
+                let contract = runtime.contract_wrapper::<NonInflatableAsset>(contract_id)?;
+                let spec = contract.spec();
+                let ticker = spec.ticker().to_string();
+                let name = spec.name().to_string();
+                let details = spec.details().map(|d| d.to_string());
+                let precision = spec.precision.into();
+                let issued_supply = contract.total_issued_supply().into();
+                let media_idx = if let Some(attachment) = contract.contract_terms().media {
+                    Some(self.get_or_insert_media(
+                        hex::encode(attachment.digest),
+                        attachment.ty.to_string(),
+                    )?)
+                } else {
+                    None
+                };
+                (
+                    LocalAssetData {
+                        name,
+                        precision,
+                        ticker: Some(ticker),
+                        details,
+                        media_idx,
+                        issued_supply,
+                    },
+                    None,
+                )
+            }
+            AssetSchema::Uda => {
+                let contract = runtime.contract_wrapper::<UniqueDigitalAsset>(contract_id)?;
+                let spec = contract.spec();
+                let ticker = spec.ticker().to_string();
+                let name = spec.name().to_string();
+                let details = spec.details().map(|d| d.to_string());
+                let precision = spec.precision.into();
+                let issued_supply = 1;
+                let token_full =
+                    Token::from_token_data(&contract.token_data(), self.get_media_dir());
+                (
+                    LocalAssetData {
+                        name,
+                        precision,
+                        ticker: Some(ticker),
+                        details,
+                        media_idx: None,
+                        issued_supply,
+                    },
+                    Some(token_full),
+                )
+            }
+            AssetSchema::Cfa => {
+                let contract = runtime.contract_wrapper::<CollectibleFungibleAsset>(contract_id)?;
+                let name = contract.name().to_string();
+                let details = contract.details().map(|d| d.to_string());
+                let precision = contract.precision().into();
+                let issued_supply = contract.total_issued_supply().into();
+                let media_idx = if let Some(attachment) = contract.contract_terms().media {
+                    Some(self.get_or_insert_media(
+                        hex::encode(attachment.digest),
+                        attachment.ty.to_string(),
+                    )?)
+                } else {
+                    None
+                };
+                (
+                    LocalAssetData {
+                        name,
+                        precision,
+                        ticker: None,
+                        details,
+                        media_idx,
+                        issued_supply,
+                    },
+                    None,
+                )
+            }
+            AssetSchema::Ifa => {
+                let contract = runtime.contract_wrapper::<InflatableFungibleAsset>(contract_id)?;
+                let spec = contract.spec();
+                let ticker = spec.ticker().to_string();
+                let name = spec.name().to_string();
+                let details = spec.details().map(|d| d.to_string());
+                let precision = spec.precision.into();
+                let issued_supply = contract.total_issued_supply().into();
+                let media_idx = if let Some(attachment) = contract.contract_terms().media {
+                    Some(self.get_or_insert_media(
+                        hex::encode(attachment.digest),
+                        attachment.ty.to_string(),
+                    )?)
+                } else {
+                    None
+                };
+                (
+                    LocalAssetData {
+                        name,
+                        precision,
+                        ticker: Some(ticker),
+                        details,
+                        media_idx,
+                        issued_supply,
+                    },
+                    None,
+                )
+            }
         };
-
-        let asset_schema = AssetSchema::get_from_contract_id(contract_id, &runtime)?;
-
-        let timestamp = contract.genesis.timestamp;
-        let (name, precision, issued_supply, ticker, details, media_idx, token) =
-            match &asset_schema {
-                AssetSchema::Nia => {
-                    let contract = runtime.contract_wrapper::<NonInflatableAsset>(contract_id)?;
-                    let spec = contract.spec();
-                    let ticker = spec.ticker().to_string();
-                    let name = spec.name().to_string();
-                    let details = spec.details().map(|d| d.to_string());
-                    let precision = spec.precision.into();
-                    let issued_supply = contract.total_issued_supply().into();
-                    let media_idx = if let Some(attachment) = contract.contract_terms().media {
-                        Some(self.get_or_insert_media(
-                            hex::encode(attachment.digest),
-                            attachment.ty.to_string(),
-                        )?)
-                    } else {
-                        None
-                    };
-                    (
-                        name,
-                        precision,
-                        issued_supply,
-                        Some(ticker),
-                        details,
-                        media_idx,
-                        None,
-                    )
-                }
-                AssetSchema::Uda => {
-                    let contract = runtime.contract_wrapper::<UniqueDigitalAsset>(contract_id)?;
-                    let spec = contract.spec();
-                    let ticker = spec.ticker().to_string();
-                    let name = spec.name().to_string();
-                    let details = spec.details().map(|d| d.to_string());
-                    let precision = spec.precision.into();
-                    let issued_supply = 1;
-                    let token_full =
-                        Token::from_token_data(&contract.token_data(), self.get_media_dir());
-                    (
-                        name,
-                        precision,
-                        issued_supply,
-                        Some(ticker),
-                        details,
-                        None,
-                        Some(token_full),
-                    )
-                }
-                AssetSchema::Cfa => {
-                    let contract =
-                        runtime.contract_wrapper::<CollectibleFungibleAsset>(contract_id)?;
-                    let name = contract.name().to_string();
-                    let details = contract.details().map(|d| d.to_string());
-                    let precision = contract.precision().into();
-                    let issued_supply = contract.total_issued_supply().into();
-                    let media_idx = if let Some(attachment) = contract.contract_terms().media {
-                        Some(self.get_or_insert_media(
-                            hex::encode(attachment.digest),
-                            attachment.ty.to_string(),
-                        )?)
-                    } else {
-                        None
-                    };
-                    (
-                        name,
-                        precision,
-                        issued_supply,
-                        None,
-                        details,
-                        media_idx,
-                        None,
-                    )
-                }
-                AssetSchema::Ifa => {
-                    let contract =
-                        runtime.contract_wrapper::<InflatableFungibleAsset>(contract_id)?;
-                    let spec = contract.spec();
-                    let ticker = spec.ticker().to_string();
-                    let name = spec.name().to_string();
-                    let details = spec.details().map(|d| d.to_string());
-                    let precision = spec.precision.into();
-                    let issued_supply = contract.total_issued_supply().into();
-                    let media_idx = if let Some(attachment) = contract.contract_terms().media {
-                        Some(self.get_or_insert_media(
-                            hex::encode(attachment.digest),
-                            attachment.ty.to_string(),
-                        )?)
-                    } else {
-                        None
-                    };
-                    (
-                        name,
-                        precision,
-                        issued_supply,
-                        Some(ticker),
-                        details,
-                        media_idx,
-                        None,
-                    )
-                }
-            };
 
         let db_asset = self.add_asset_to_db(
             contract_id.to_string(),
             &asset_schema,
             None,
-            details,
-            issued_supply,
-            name,
-            precision,
-            ticker,
             timestamp,
-            media_idx,
+            local_asset_data,
         )?;
 
         if let Some(token) = token {
@@ -669,6 +645,29 @@ impl Wallet {
                 )?;
             }
         }
+
+        Ok(())
+    }
+
+    /// Extract the metadata of a new RGB asset and save the asset into the DB.
+    ///
+    /// <div class="warning">This method is meant for special usage and is normally not needed, use
+    /// it only if you know what you're doing</div>
+    pub fn save_new_asset(&self, consignment: RgbTransfer) -> Result<(), Error> {
+        info!(self.logger, "Saving new asset...");
+        let runtime = self.rgb_runtime()?;
+
+        let contract_id = consignment.contract_id();
+
+        let asset_schema: AssetSchema = consignment.schema_id().try_into()?;
+        let types = asset_schema.types();
+        let contract = consignment.into_contract();
+        let valid_contract = contract
+            .clone()
+            .validate(&DumbResolver, self.chain_net(), None, types)
+            .expect("valid consignment");
+
+        self.save_new_asset_internal(&runtime, contract_id, asset_schema, valid_contract)?;
 
         self.update_backup_info(false)?;
 
@@ -720,32 +719,13 @@ impl Wallet {
         res
     }
 
-    /// Return the transfer dir path for the provided transfer ID (e.g. the TXID).
-    ///
-    /// <div class="warning">This method is meant for special usage and is normally not needed, use
-    /// it only if you know what you're doing</div>
-    pub fn get_transfer_dir(&self, transfer_id: &str) -> PathBuf {
-        self.get_transfers_dir().join(transfer_id)
-    }
-
-    /// Return the asset transfer dir path for the provided transfer dir and asset ID.
-    ///
-    /// <div class="warning">This method is meant for special usage and is normally not needed, use
-    /// it only if you know what you're doing</div>
-    pub fn get_asset_transfer_dir<P: AsRef<Path>>(
-        &self,
-        transfer_dir: P,
-        asset_id: &str,
-    ) -> PathBuf {
-        let asset_id_no_prefix = asset_id.replace(ASSET_ID_PREFIX, "");
-        transfer_dir.as_ref().join(&asset_id_no_prefix)
-    }
-
     /// Return the consignment file path for a send transfer of an asset.
     ///
     /// <div class="warning">This method is meant for special usage and is normally not needed, use
     /// it only if you know what you're doing</div>
-    pub fn get_send_consignment_path<P: AsRef<Path>>(&self, asset_transfer_dir: P) -> PathBuf {
-        asset_transfer_dir.as_ref().join(CONSIGNMENT_FILE)
+    pub fn get_send_consignment_path(&self, asset_id: &str, transfer_id: &str) -> PathBuf {
+        let transfer_dir = self.get_transfer_dir(transfer_id);
+        let asset_transfer_dir = self.get_asset_transfer_dir(transfer_dir, asset_id);
+        asset_transfer_dir.join(CONSIGNMENT_FILE)
     }
 }
