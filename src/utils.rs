@@ -280,7 +280,7 @@ pub(crate) fn get_account_derivation_children(coin_type: u32) -> Vec<ChildNumber
     ]
 }
 
-fn derive_account_xprv_from_mnemonic(
+pub(crate) fn derive_account_xprv_from_mnemonic(
     bitcoin_network: &BitcoinNetwork,
     mnemonic: &str,
     rgb: bool,
