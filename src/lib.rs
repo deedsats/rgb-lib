@@ -39,13 +39,13 @@
 //! ## Examples
 //! ### Create an RGB singlesig wallet
 //! ```
-//! use rgb_lib::keys::generate_keys;
+//! use rgb_lib::keys::{WitnessVersion, generate_keys};
 //! use rgb_lib::wallet::{DatabaseType, SinglesigKeys, Wallet, WalletData};
 //! use rgb_lib::{AssetSchema, BitcoinNetwork};
 //!
 //! fn main() -> Result<(), rgb_lib::Error> {
 //!     let data_dir = tempfile::tempdir()?;
-//!     let keys = generate_keys(BitcoinNetwork::Regtest);
+//!     let keys = generate_keys(BitcoinNetwork::Regtest, WitnessVersion::Taproot);
 //!     let single_sig_keys = SinglesigKeys::from_keys(&keys, None);
 //!     let wallet_data = WalletData {
 //!         data_dir: data_dir.path().to_str().unwrap().to_string(),
@@ -81,7 +81,9 @@ pub use rgbstd::{
 };
 
 pub use crate::{
-    database::enums::{AssetSchema, Assignment, TransferStatus, TransportType},
+    database::enums::{
+        AssetSchema, Assignment, TransferStatus, TransportType, WalletTransactionType,
+    },
     error::Error,
     utils::{BitcoinNetwork, block_on},
 };
@@ -201,7 +203,7 @@ use rgbstd::{
 #[cfg(any(feature = "electrum", feature = "esplora"))]
 use rgbstd::{
     TransitionType,
-    containers::{Consignment, Contract},
+    containers::Consignment,
     contract::FilterIncludeAll,
     daggy::Walker,
     indexers::AnyResolver,
@@ -212,16 +214,16 @@ use rgbstd::{
 use schemata::{CfaWrapper, NiaWrapper, UdaWrapper};
 use schemata::{
     CollectibleFungibleAsset, IfaWrapper, InflatableFungibleAsset, NonInflatableAsset, OS_ASSET,
-    OS_INFLATION, TS_INFLATION, TS_TRANSFER, UniqueDigitalAsset,
+    OS_INFLATION, TS_BURN, TS_INFLATION, TS_TRANSFER, UniqueDigitalAsset,
 };
 use scrypt::{
     Params, Scrypt,
     password_hash::{PasswordHasher, Salt, SaltString, rand_core::OsRng},
 };
 use sea_orm::{
-    ActiveValue, ColumnTrait, ConnectOptions, Database, DatabaseConnection, DbErr,
-    DeriveActiveEnum, EntityTrait, EnumIter, IntoActiveValue, JsonValue, QueryFilter, QueryOrder,
-    QueryResult, TryGetError, TryGetable, TryIntoModel,
+    ActiveValue, ColumnTrait, ConnectOptions, Database, DatabaseConnection, DatabaseTransaction,
+    DbErr, DeriveActiveEnum, EntityTrait, EnumIter, IntoActiveValue, JsonValue, QueryFilter,
+    QueryOrder, QueryResult, TransactionTrait, TryGetError, TryGetable, TryIntoModel,
 };
 use serde::de::{self, Unexpected, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -262,6 +264,7 @@ use crate::{
         DbData,
         entities::{
             pending_witness_script::Model as DbPendingWitnessScript,
+            reserved_txo::ActiveModel as DbReservedTxoActMod,
             wallet_transaction::ActiveModel as DbWalletTransactionActMod,
         },
     },
@@ -274,7 +277,7 @@ use crate::{
 };
 use crate::{
     database::{
-        RgbLibDatabase,
+        DbTxn, RgbLibDatabase,
         entities::{
             asset::{ActiveModel as DbAssetActMod, Model as DbAsset},
             asset_transfer::{ActiveModel as DbAssetTransferActMod, Model as DbAssetTransfer},
@@ -283,6 +286,7 @@ use crate::{
             coloring::{ActiveModel as DbColoringActMod, Model as DbColoring},
             media::{ActiveModel as DbMediaActMod, Model as DbMedia},
             pending_witness_script::ActiveModel as DbPendingWitnessScriptActMod,
+            reserved_txo::Model as DbReservedTxo,
             token::{ActiveModel as DbTokenActMod, Model as DbToken},
             token_media::{ActiveModel as DbTokenMediaActMod, Model as DbTokenMedia},
             transfer::{ActiveModel as DbTransferActMod, Model as DbTransfer},
@@ -296,10 +300,10 @@ use crate::{
             txo::{ActiveModel as DbTxoActMod, Model as DbTxo},
             wallet_transaction::Model as DbWalletTransaction,
         },
-        enums::{ColoringType, RecipientTypeFull, WalletTransactionType},
+        enums::{ColoringType, RecipientTypeFull},
     },
     error::InternalError,
-    keys::Keys,
+    keys::{Keys, WitnessVersion},
     utils::{
         ACCOUNT, DumbResolver, KEYCHAIN_BTC, KEYCHAIN_RGB, LOG_FILE, PURPOSE, RgbRuntime,
         adjust_canonicalization, beneficiary_from_script_buf, derive_account_xprv_from_mnemonic,

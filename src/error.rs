@@ -38,6 +38,10 @@ pub enum Error {
     #[error("The given PSBTs cannot be combined")]
     CannotCombinePsbts,
 
+    /// Requested pending vanilla TX cannot be aborted
+    #[error("Pending vanilla TX cannot be aborted")]
+    CannotAbortPendingVanillaTx,
+
     /// Requested batch transfer cannot be deleted
     #[error("Batch transfer cannot be deleted")]
     CannotDeleteBatchTransfer,
@@ -57,6 +61,13 @@ pub enum Error {
     /// Cannot use IFA schema on mainnet
     #[error("Cannot use IFA schema on mainnet")]
     CannotUseIfaOnMainnet,
+
+    /// A database error has been encountered
+    #[error("Database error: {details}")]
+    Database {
+        /// Error details
+        details: String,
+    },
 
     /// The provided file is empty
     #[error("Empty file: {file_path}")]
@@ -369,6 +380,13 @@ pub enum Error {
     #[error("Invalid vanilla keychain")]
     InvalidVanillaKeychain,
 
+    /// Invalid witness version
+    #[error("Invalid witness version: {witness_version}")]
+    InvalidWitnessVersion {
+        /// The invalid witness version
+        witness_version: String,
+    },
+
     /// The maximum fee has been exceeded
     #[error("Max fee exceeded for transfer with TXID: {txid}")]
     MaxFeeExceeded {
@@ -436,6 +454,10 @@ pub enum Error {
         /// Error details
         details: String,
     },
+
+    /// Cannot burn an asset with zero amount
+    #[error("Burn request with zero amount")]
+    NoBurnAmount,
 
     /// No consignment found
     #[error("No consignment found")]
@@ -557,7 +579,14 @@ pub enum Error {
         version: String,
     },
 
-    /// The schema doesn't support inflation
+    /// The schema doesn't support burn transitions
+    #[error("Burn not supported")]
+    UnsupportedBurn {
+        /// Asset schema
+        asset_schema: AssetSchema,
+    },
+
+    /// The schema doesn't support inflate transitions
     #[error("Inflation not supported")]
     UnsupportedInflation {
         /// Asset schema
@@ -638,9 +667,6 @@ pub(crate) enum InternalError {
 
     #[error("Confinement error: {0}")]
     Confinement(#[from] amplify::confinement::Error),
-
-    #[error("Database error: {0}")]
-    Database(#[from] sea_orm::DbErr),
 
     #[error("Encode error: {0}")]
     Encode(#[from] bitcoin::consensus::encode::Error),
@@ -874,6 +900,14 @@ impl From<std::io::Error> for Error {
 impl From<InternalError> for Error {
     fn from(e: InternalError) -> Self {
         Error::Internal {
+            details: e.to_string(),
+        }
+    }
+}
+
+impl From<sea_orm::DbErr> for Error {
+    fn from(e: sea_orm::DbErr) -> Self {
+        Error::Database {
             details: e.to_string(),
         }
     }

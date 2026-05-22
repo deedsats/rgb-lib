@@ -7,7 +7,7 @@ fn success() {
     let test_data_dir_str = test_data_dir.to_string_lossy().to_string();
 
     // test manual values
-    let keys = generate_keys(BitcoinNetwork::Signet);
+    let keys = generate_keys(BitcoinNetwork::Signet, WitnessVersion::Taproot);
     let wallet_1 = Wallet::new(
         WalletData {
             data_dir: test_data_dir_str.clone(),
@@ -20,7 +20,7 @@ fn success() {
     )
     .unwrap();
 
-    let wallet_1_data = test_get_wallet_data(&wallet_1);
+    let wallet_1_data = wallet_1.get_wallet_data();
     assert_eq!(wallet_1_data.data_dir, test_data_dir_str);
     assert_eq!(
         wallet_1.get_wallet_dir().parent().unwrap(),
@@ -42,7 +42,7 @@ fn success() {
         SinglesigKeys::from_keys_no_mnemonic(&keys, None),
     )
     .unwrap();
-    let wallet_2_data = test_get_wallet_data(&wallet_2);
+    let wallet_2_data = wallet_2.get_wallet_data();
     assert_eq!(wallet_2_data.data_dir, test_data_dir_str);
     assert_eq!(wallet_2_data.bitcoin_network, BitcoinNetwork::Regtest);
     assert!(matches!(wallet_2_data.database_type, DatabaseType::Sqlite));

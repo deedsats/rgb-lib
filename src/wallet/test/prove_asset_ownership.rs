@@ -7,10 +7,10 @@ fn success() {
     initialize();
 
     let amount: u64 = 66;
-    let (mut wallet, online) = get_funded_wallet!();
-    let (mut rcv_wallet, rcv_online) = get_funded_wallet!();
-    let asset = test_issue_asset_nia(&mut wallet, online, None);
-    let receive_data = test_blind_receive(&mut rcv_wallet);
+    let mut party = get_funded_party!();
+    let mut rcv_party = get_funded_party!();
+    let asset = party.issue_asset_nia(None);
+    let receive_data = rcv_party.blind_receive();
     let recipient_map = HashMap::from([(
         asset.asset_id.clone(),
         vec![Recipient {
@@ -20,12 +20,17 @@ fn success() {
             transport_endpoints: TRANSPORT_ENDPOINTS.clone(),
         }],
     )]);
-    let txid = test_send(&mut wallet, online, &recipient_map);
+    let txid = party.send(recipient_map, FEE_RATE, None).txid;
 
-    let consignment_path = wallet.get_send_consignment_path(&asset.asset_id, &txid);
+    let consignment_path = party
+        .wallet
+        .get_send_consignment_path(&asset.asset_id, &txid);
     let consignment = RgbTransfer::load_file(consignment_path).unwrap();
     let message = b"test nonce";
-    let signatures = wallet.prove_asset_ownership(&consignment, message).unwrap();
+    let signatures = party
+        .wallet
+        .prove_asset_ownership(&consignment, message)
+        .unwrap();
     assert!(!signatures.is_empty());
 
     let secp = Secp256k1::new();
@@ -60,14 +65,14 @@ fn success() {
     }
 
     // settle the first transfer so change becomes spendable
-    wait_for_refresh(&mut rcv_wallet, rcv_online, None, None);
-    wait_for_refresh(&mut wallet, online, Some(&asset.asset_id), None);
-    mine(false, false);
-    wait_for_refresh(&mut rcv_wallet, rcv_online, None, None);
-    wait_for_refresh(&mut wallet, online, Some(&asset.asset_id), None);
+    rcv_party.wait_for_refresh(None);
+    party.wait_for_refresh(Some(&asset.asset_id));
+    mine(false);
+    rcv_party.wait_for_refresh(None);
+    party.wait_for_refresh(Some(&asset.asset_id));
 
     // send to self with witness receive, both P2TR outputs should be ours
-    let receive_data = test_witness_receive(&mut wallet);
+    let receive_data = party.witness_receive();
     let recipient_map = HashMap::from([(
         asset.asset_id.clone(),
         vec![Recipient {
@@ -80,10 +85,13 @@ fn success() {
             transport_endpoints: TRANSPORT_ENDPOINTS.clone(),
         }],
     )]);
-    let txid = test_send(&mut wallet, online, &recipient_map);
-    let consignment_path = wallet.get_send_consignment_path(&asset.asset_id, &txid);
+    let txid = party.send(recipient_map, FEE_RATE, None).txid;
+    let consignment_path = party
+        .wallet
+        .get_send_consignment_path(&asset.asset_id, &txid);
     let consignment = RgbTransfer::load_file(consignment_path).unwrap();
-    let signatures = wallet
+    let signatures = party
+        .wallet
         .prove_asset_ownership(&consignment, b"self send")
         .unwrap();
     assert_eq!(signatures.len(), 2);
@@ -99,10 +107,10 @@ fn fail() {
     initialize();
 
     let amount: u64 = 66;
-    let (mut wallet, online) = get_funded_wallet!();
-    let (mut rcv_wallet, _rcv_online) = get_funded_wallet!();
-    let asset = test_issue_asset_nia(&mut wallet, online, None);
-    let receive_data = test_blind_receive(&mut rcv_wallet);
+    let mut party = get_funded_party!();
+    let mut rcv_party = get_funded_party!();
+    let asset = party.issue_asset_nia(None);
+    let receive_data = rcv_party.blind_receive();
     let recipient_map = HashMap::from([(
         asset.asset_id.clone(),
         vec![Recipient {
@@ -112,17 +120,21 @@ fn fail() {
             transport_endpoints: TRANSPORT_ENDPOINTS.clone(),
         }],
     )]);
-    let txid = test_send(&mut wallet, online, &recipient_map);
-    let consignment_path = wallet.get_send_consignment_path(&asset.asset_id, &txid);
+    let txid = party.send(recipient_map, FEE_RATE, None).txid;
+    let consignment_path = party
+        .wallet
+        .get_send_consignment_path(&asset.asset_id, &txid);
     let consignment = RgbTransfer::load_file(consignment_path).unwrap();
 
     let (wo_wallet, _wo_online) = get_funded_noutxo_wallet(false, None);
     let result = wo_wallet.prove_asset_ownership(&consignment, b"test");
     assert!(matches!(result, Err(Error::WatchOnly)));
 
-    let runtime = wallet.rgb_runtime().unwrap();
+    let runtime = party.wallet.rgb_runtime().unwrap();
     let contract_id = ContractId::from_str(&asset.asset_id).unwrap();
     let empty_consignment = runtime.transfer(contract_id, [], [], None).unwrap();
-    let result = wallet.prove_asset_ownership(&empty_consignment, b"test");
+    let result = party
+        .wallet
+        .prove_asset_ownership(&empty_consignment, b"test");
     assert!(matches!(result, Err(Error::NoConsignment)));
 }
