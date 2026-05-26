@@ -66,6 +66,28 @@ pub struct OnlineData {
     pub(crate) resolver: AnyResolver,
     pub(crate) hub_client: Option<MultisigHubClient>,
     pub(crate) user_role: Option<UserRole>,
+    pub(crate) vanilla_sync_lookback: u32,
+}
+
+/// Options for the [`Wallet::go_online`] and [`MultisigWallet::go_online`] methods.
+#[cfg(any(feature = "electrum", feature = "esplora"))]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "camel_case", serde(rename_all = "camelCase"))]
+pub struct OnlineOptions {
+    /// URL of the indexer to use
+    pub indexer_url: String,
+    /// Whether to skip the consistency check when going online.
+    ///
+    /// Setting this to false runs a check on UTXOs (BDK vs rgb-lib DB), assets (RGB vs rgb-lib DB)
+    /// and media (DB vs actual files) to try and detect possible inconsistencies in the wallet.
+    /// Setting this to true bypasses the check and allows operating an inconsistent wallet.
+    ///
+    /// <div class="warning">Warning: setting <tt>skip_consistency_check</tt> to true is dangerous,
+    /// only do this if you know what you're doing!</div>
+    pub skip_consistency_check: bool,
+    /// Number of addresses before the last used (or last revealed if none) address to sync when
+    /// doing an automatic FastSync for the vanilla keychain
+    pub vanilla_sync_lookback: u32,
 }
 
 // ────────────────────────────────────────────────────────────
@@ -116,7 +138,7 @@ impl From<Outpoint> for OutPoint {
 ///
 /// This structure is used both for RGB assets and BTC balances (in sats). When used for a BTC
 /// balance it can be used both for the vanilla wallet and the colored wallet.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[cfg_attr(feature = "camel_case", serde(rename_all = "camelCase"))]
 pub struct Balance {
     /// Settled balance, based on operations that have reached the final status
@@ -136,7 +158,7 @@ pub struct Balance {
 /// balances.
 /// The spendable balances include the settled balance and also the untrusted and trusted pending
 /// balances.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[cfg_attr(feature = "camel_case", serde(rename_all = "camelCase"))]
 pub struct BtcBalance {
     /// Funds that will never hold RGB assets
@@ -403,6 +425,7 @@ pub struct AssetNIA {
 
 impl AssetNIA {
     pub(crate) fn get_asset_details(
+        txn: &DbTxn,
         wallet: &(impl WalletOffline + ?Sized),
         asset: &DbAsset,
         transfers: Option<Vec<DbTransfer>>,
@@ -416,14 +439,14 @@ impl AssetNIA {
             let medias = if let Some(m) = medias {
                 m
             } else {
-                wallet.database().iter_media()?
+                txn.iter_media()?
             };
             medias
                 .iter()
                 .find(|m| Some(m.idx) == asset.media_idx)
                 .map(|m| Media::from_db_media(m, wallet.media_dir()))
         };
-        let balance = wallet.database().get_asset_balance(
+        let balance = txn.get_asset_balance(
             asset.id.clone(),
             transfers,
             asset_transfers,
@@ -475,6 +498,7 @@ pub struct AssetUDA {
 
 impl AssetUDA {
     pub(crate) fn get_asset_details(
+        txn: &DbTxn,
         wallet: &(impl WalletOffline + ?Sized),
         asset: &DbAsset,
         token: Option<TokenLight>,
@@ -489,14 +513,14 @@ impl AssetUDA {
             let medias = if let Some(m) = medias {
                 m
             } else {
-                wallet.database().iter_media()?
+                txn.iter_media()?
             };
             medias
                 .iter()
                 .find(|m| Some(m.idx) == asset.media_idx)
                 .map(|m| Media::from_db_media(m, wallet.media_dir()))
         };
-        let balance = wallet.database().get_asset_balance(
+        let balance = txn.get_asset_balance(
             asset.id.clone(),
             transfers,
             asset_transfers,
@@ -545,6 +569,7 @@ pub struct AssetCFA {
 
 impl AssetCFA {
     pub(crate) fn get_asset_details(
+        txn: &DbTxn,
         wallet: &(impl WalletOffline + ?Sized),
         asset: &DbAsset,
         transfers: Option<Vec<DbTransfer>>,
@@ -558,14 +583,14 @@ impl AssetCFA {
             let medias = if let Some(m) = medias {
                 m
             } else {
-                wallet.database().iter_media()?
+                txn.iter_media()?
             };
             medias
                 .iter()
                 .find(|m| Some(m.idx) == asset.media_idx)
                 .map(|m| Media::from_db_media(m, wallet.media_dir()))
         };
-        let balance = wallet.database().get_asset_balance(
+        let balance = txn.get_asset_balance(
             asset.id.clone(),
             transfers,
             asset_transfers,
@@ -622,6 +647,7 @@ pub struct AssetIFA {
 
 impl AssetIFA {
     pub(crate) fn get_asset_details(
+        txn: &DbTxn,
         wallet: &(impl WalletOffline + ?Sized),
         asset: &DbAsset,
         transfers: Option<Vec<DbTransfer>>,
@@ -635,14 +661,14 @@ impl AssetIFA {
             let medias = if let Some(m) = medias {
                 m
             } else {
-                wallet.database().iter_media()?
+                txn.iter_media()?
             };
             medias
                 .iter()
                 .find(|m| Some(m.idx) == asset.media_idx)
                 .map(|m| Media::from_db_media(m, wallet.media_dir()))
         };
-        let balance = wallet.database().get_asset_balance(
+        let balance = txn.get_asset_balance(
             asset.id.clone(),
             transfers,
             asset_transfers,
@@ -692,6 +718,7 @@ pub struct Assets {
 
 pub(crate) trait IssuedAssetDetails: Sized {
     fn from_issuance(
+        txn: &DbTxn,
         wallet: &(impl WalletOffline + ?Sized),
         asset: &DbAsset,
         issue_data: &IssueData,
@@ -700,21 +727,24 @@ pub(crate) trait IssuedAssetDetails: Sized {
 
 impl IssuedAssetDetails for AssetNIA {
     fn from_issuance(
+        txn: &DbTxn,
         wallet: &(impl WalletOffline + ?Sized),
         asset: &DbAsset,
         _issue_data: &IssueData,
     ) -> Result<Self, Error> {
-        Self::get_asset_details(wallet, asset, None, None, None, None, None, None)
+        Self::get_asset_details(txn, wallet, asset, None, None, None, None, None, None)
     }
 }
 
 impl IssuedAssetDetails for AssetUDA {
     fn from_issuance(
+        txn: &DbTxn,
         wallet: &(impl WalletOffline + ?Sized),
         asset: &DbAsset,
         issue_data: &IssueData,
     ) -> Result<Self, Error> {
         Self::get_asset_details(
+            txn,
             wallet,
             asset,
             issue_data.asset_data.token.clone().map(|t| t.into()),
@@ -730,21 +760,23 @@ impl IssuedAssetDetails for AssetUDA {
 
 impl IssuedAssetDetails for AssetCFA {
     fn from_issuance(
+        txn: &DbTxn,
         wallet: &(impl WalletOffline + ?Sized),
         asset: &DbAsset,
         _issue_data: &IssueData,
     ) -> Result<Self, Error> {
-        Self::get_asset_details(wallet, asset, None, None, None, None, None, None)
+        Self::get_asset_details(txn, wallet, asset, None, None, None, None, None, None)
     }
 }
 
 impl IssuedAssetDetails for AssetIFA {
     fn from_issuance(
+        txn: &DbTxn,
         wallet: &(impl WalletOffline + ?Sized),
         asset: &DbAsset,
         _issue_data: &IssueData,
     ) -> Result<Self, Error> {
-        Self::get_asset_details(wallet, asset, None, None, None, None, None, None)
+        Self::get_asset_details(txn, wallet, asset, None, None, None, None, None, None)
     }
 }
 
@@ -867,6 +899,8 @@ pub enum TypeOfTransition {
     Inflate,
     /// Transfer transition (moving existing tokens)
     Transfer,
+    /// Burn transition (burning existing tokens)
+    Burn,
 }
 
 impl TypeOfTransition {
@@ -875,6 +909,7 @@ impl TypeOfTransition {
         match self {
             Self::Inflate => "inflate",
             Self::Transfer => "transfer",
+            Self::Burn => "burn",
         }
     }
 }
@@ -1181,6 +1216,8 @@ pub enum TransferKind {
     Send,
     /// An inflation transfer
     Inflation,
+    /// A burn transfer
+    Burn,
 }
 
 #[derive(Debug, Clone)]
@@ -1196,6 +1233,7 @@ pub struct TransferData {
     pub(crate) updated_at: i64,
     pub(crate) expiration_timestamp: Option<i64>,
     pub(crate) consignment_path: Option<String>,
+    pub(crate) psbt_path: Option<String>,
 }
 
 /// An RGB transfer.
@@ -1234,6 +1272,8 @@ pub struct Transfer {
     pub invoice_string: Option<String>,
     /// Consignment path
     pub consignment_path: Option<String>,
+    /// Path of the unsigned PSBT produced by the `_begin` step, when available
+    pub psbt_path: Option<String>,
 }
 
 impl DbTransfer {
@@ -1259,6 +1299,7 @@ impl DbTransfer {
             transport_endpoints,
             invoice_string: self.invoice_string.clone(),
             consignment_path: td.consignment_path,
+            psbt_path: td.psbt_path,
         }
     }
 }
@@ -1423,7 +1464,7 @@ impl From<LocalRgbAllocation> for RgbAllocation {
 // ────────────────────────────────────────────────────────────
 
 /// The type of a transaction.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub enum TransactionType {
     /// Transaction used to perform an RGB send
     RgbSend,
@@ -1431,8 +1472,20 @@ pub enum TransactionType {
     Drain,
     /// Transaction used to create UTXOs
     CreateUtxos,
-    /// Transaction not created by rgb-lib directly
-    User,
+    /// Transaction used to perform a BTC send
+    SendBtc,
+    /// Incoming transaction
+    Incoming,
+}
+
+/// A pending vanilla transaction that has reserved TXOs in the wallet.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "camel_case", serde(rename_all = "camelCase"))]
+pub struct PendingVanillaTx {
+    /// Transaction ID
+    pub txid: String,
+    /// Type of vanilla operation that reserved the TXOs
+    pub r#type: WalletTransactionType,
 }
 
 /// A Bitcoin transaction.
@@ -1569,8 +1622,34 @@ pub struct RgbInspection {
 }
 
 // ────────────────────────────────────────────────────────────
-// Send, inflate & refresh operations
+// Send, inflate, burn & refresh operations
 // ────────────────────────────────────────────────────────────
+
+/// The result of a burn begin operation.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg(any(feature = "electrum", feature = "esplora"))]
+#[cfg_attr(feature = "camel_case", serde(rename_all = "camelCase"))]
+pub struct BurnBeginResult {
+    /// PSBT to inspect and sign
+    pub psbt: String,
+    /// Batch transfer idx, None when `dry_run: true`
+    pub batch_transfer_idx: Option<i32>,
+    /// Operation details
+    pub details: BurnDetails,
+}
+
+/// Details for burn operations.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[cfg(any(feature = "electrum", feature = "esplora"))]
+#[cfg_attr(feature = "camel_case", serde(rename_all = "camelCase"))]
+pub struct BurnDetails {
+    /// Path to fascia file for inspection
+    pub fascia_path: String,
+    /// Minimum confirmations for the operation
+    pub min_confirmations: u8,
+    /// Entropy used for the merkle tree construction operation
+    pub entropy: u64,
+}
 
 /// The result of an inflate begin operation.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1845,4 +1924,23 @@ pub enum PrepareRgbPsbtResult {
 pub enum PrepareTransferPsbtResult {
     Retry,
     Success(Box<BeginOperationData>),
+}
+
+#[cfg(any(feature = "electrum", feature = "esplora"))]
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ReceivedConsignmentMeta {
+    pub txid: String,
+    pub vout: Option<u32>,
+}
+
+#[cfg(any(feature = "electrum", feature = "esplora"))]
+pub enum TryFailBatchTransferOutcome {
+    Failed,
+    Refreshed,
+}
+
+#[cfg(any(feature = "electrum", feature = "esplora"))]
+pub struct FailTransfersOutcome {
+    pub transfers_changed: bool,
+    pub cannot_fail: bool,
 }

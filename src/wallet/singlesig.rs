@@ -19,16 +19,19 @@ pub struct SinglesigKeys {
     pub master_fingerprint: String,
     /// Wallet mnemonic phrase
     pub mnemonic: Option<String>,
+    /// Witness version these keys were derived with
+    #[serde(default)]
+    pub witness_version: WitnessVersion,
 }
 
 impl SinglesigKeys {
     pub(crate) fn build_descriptors(
         &self,
         bitcoin_network: &BitcoinNetwork,
-        bdk_network: &BdkNetwork,
     ) -> Result<(WalletDescriptors, bool), Error> {
-        let xpub_rgb = str_to_xpub(&self.account_xpub_colored, bdk_network)?;
-        let xpub_btc = str_to_xpub(&self.account_xpub_vanilla, bdk_network)?;
+        let network_kind = bitcoin_network.network_kind();
+        let xpub_rgb = str_to_xpub(&self.account_xpub_colored, &network_kind)?;
+        let xpub_btc = str_to_xpub(&self.account_xpub_vanilla, &network_kind)?;
         Ok(if let Some(mnemonic) = &self.mnemonic {
             let descs = get_descriptors(
                 bitcoin_network,
@@ -36,6 +39,7 @@ impl SinglesigKeys {
                 self.vanilla_keychain,
                 &xpub_btc,
                 &xpub_rgb,
+                self.witness_version,
             )?;
             // check master fingerprint derived from mnemonic matches provided one
             let mnemonic = Mnemonic::parse_in(Language::English, mnemonic)?;
@@ -56,6 +60,7 @@ impl SinglesigKeys {
                 &xpub_rgb,
                 &xpub_btc,
                 self.vanilla_keychain,
+                self.witness_version,
             )?;
             (descs, true)
         })
@@ -69,6 +74,7 @@ impl SinglesigKeys {
             vanilla_keychain,
             master_fingerprint: keys.master_fingerprint.clone(),
             mnemonic: Some(keys.mnemonic.clone()),
+            witness_version: keys.witness_version,
         }
     }
 
@@ -80,6 +86,7 @@ impl SinglesigKeys {
             vanilla_keychain,
             master_fingerprint: keys.master_fingerprint.clone(),
             mnemonic: None,
+            witness_version: keys.witness_version,
         }
     }
 }
@@ -108,16 +115,32 @@ impl WalletOffline for Wallet {}
 
 #[cfg(any(feature = "electrum", feature = "esplora"))]
 impl WalletOnline for Wallet {
-    fn wallet_specific_consistency_checks(&mut self) -> Result<(), Error> {
-        self.sync_db_txos(true, false)?;
+    fn wallet_specific_consistency_checks(&mut self, txn: &DbTxn) -> Result<(), Error> {
+        self.sync_wallet(
+            txn,
+            SyncOptions {
+                keychain: SyncKeychain::Colored,
+                strategy: SyncStrategy::FullScan,
+            },
+            false,
+        )?;
+        self.sync_wallet(
+            txn,
+            SyncOptions {
+                keychain: SyncKeychain::Vanilla {
+                    lookback: self.vanilla_sync_lookback(),
+                },
+                strategy: SyncStrategy::FullScan,
+            },
+            false,
+        )?;
         let bdk_utxos: Vec<String> = self
             .bdk_wallet()
             .list_unspent()
             .map(|u| u.outpoint.to_string())
             .collect();
         let bdk_utxos: HashSet<String> = HashSet::from_iter(bdk_utxos);
-        let db_utxos: Vec<String> = self
-            .database()
+        let db_utxos: Vec<String> = txn
             .iter_txos()?
             .into_iter()
             .filter(|t| !t.spent && t.exists)
@@ -131,10 +154,6 @@ impl WalletOnline for Wallet {
             });
         }
         Ok(())
-    }
-
-    fn list_internal_for_broadcast(&self) -> impl Iterator<Item = LocalOutput> + '_ {
-        self.internal_unspents()
     }
 }
 
@@ -151,10 +170,9 @@ impl Wallet {
     /// [`SinglesigKeys`].
     pub fn new(wallet_data: WalletData, keys: SinglesigKeys) -> Result<Self, Error> {
         let wdata = wallet_data.clone();
-        let bdk_network = BdkNetwork::from(wdata.bitcoin_network);
 
         // wallet keys
-        let (descs, watch_only) = keys.build_descriptors(&wdata.bitcoin_network, &bdk_network)?;
+        let (descs, watch_only) = keys.build_descriptors(&wdata.bitcoin_network)?;
 
         // wallet directory and file logging setup
         let (wallet_dir, logger, _logger_guard) =
@@ -167,7 +185,7 @@ impl Wallet {
             descs.colored,
             descs.vanilla,
             watch_only,
-            bdk_network,
+            BdkNetwork::from(wdata.bitcoin_network),
         )?;
 
         // setup RGB
@@ -201,10 +219,7 @@ impl Wallet {
     /// Return the descriptors of the wallet.
     pub fn get_descriptors(&self) -> WalletDescriptors {
         self.keys
-            .build_descriptors(
-                &self.internals.wallet_data.bitcoin_network,
-                &BdkNetwork::from(self.internals.wallet_data.bitcoin_network),
-            )
+            .build_descriptors(&self.internals.wallet_data.bitcoin_network)
             .expect("already succeeded at wallet creation")
             .0
     }
@@ -237,24 +252,75 @@ impl Wallet {
     /// Return a new Bitcoin address from the vanilla wallet.
     pub fn get_address(&mut self) -> Result<String, Error> {
         info!(self.logger(), "Getting address...");
-
         let address = self.get_new_addresses(KeychainKind::Internal, 1)?;
-
-        self.update_backup_info(false)?;
-
+        let txn = self.database().begin_transaction()?;
+        self.update_backup_info(&txn, false)?;
+        txn.commit()?;
         info!(self.logger(), "Get address completed");
         Ok(address.to_string())
     }
 
+    /// List the pending vanilla transactions that have reserved TXOs in the wallet.
+    ///
+    /// A vanilla transaction becomes "pending" when the caller invokes a vanilla `_begin` method
+    /// (e.g. [`send_btc_begin`](Wallet::send_btc_begin)) with `dry_run = false`. The reserved
+    /// TXOs are freed when the matching `_end` method is called or via
+    /// [`abort_pending_vanilla_tx`](Wallet::abort_pending_vanilla_tx).
+    pub fn list_pending_vanilla_txs(&self) -> Result<Vec<PendingVanillaTx>, Error> {
+        info!(self.logger(), "Listing pending vanilla TXs...");
+        let txn = self.database().begin_transaction()?;
+        let reserved_idxs: Vec<i32> = txn
+            .iter_reserved_txos()?
+            .into_iter()
+            .filter_map(|r| r.reserved_for)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let result = if reserved_idxs.is_empty() {
+            vec![]
+        } else {
+            txn.get_wallet_transactions_by_idxs(&reserved_idxs)?
+                .into_iter()
+                .map(|wt| PendingVanillaTx {
+                    txid: wt.txid,
+                    r#type: wt.r#type,
+                })
+                .collect()
+        };
+        txn.commit()?;
+        info!(self.logger(), "List pending vanilla TXs completed");
+        Ok(result)
+    }
+
+    /// Abort a pending vanilla transaction, releasing the TXOs it reserved.
+    ///
+    /// Errors with [`Error::CannotAbortPendingVanillaTx`] if no pending vanilla transaction with
+    /// the given `txid` is found (e.g. because it was never created by the wallet, was already
+    /// aborted or has been broadcast).
+    pub fn abort_pending_vanilla_tx(&self, txid: String) -> Result<(), Error> {
+        info!(self.logger(), "Aborting pending vanilla TX {}...", txid);
+        let txn = self.database().begin_transaction()?;
+        let (wt, reservations) = txn
+            .get_wallet_transaction_with_reserved_txos_by_txid(&txid)?
+            .ok_or(Error::CannotAbortPendingVanillaTx)?;
+        if reservations.is_empty() {
+            return Err(Error::CannotAbortPendingVanillaTx);
+        }
+        txn.del_wallet_transaction(wt.idx)?; // relies on cascade to delete reserved txos
+        self.update_backup_info(&txn, false)?;
+        txn.commit()?;
+        info!(self.logger(), "Abort pending vanilla TX completed");
+        Ok(())
+    }
+
     fn finalize_offline_issuance<T: IssuedAssetDetails>(
         &self,
+        txn: &DbTxn,
         issue_data: &IssueData,
     ) -> Result<T, Error> {
         let mut runtime = self.rgb_runtime()?;
-        let asset = self.import_and_save_contract(issue_data, &mut runtime)?;
-        let result = T::from_issuance(self, &asset, issue_data)?;
-        self.update_backup_info(false)?;
-        Ok(result)
+        let asset = self.import_and_save_contract(txn, issue_data, &mut runtime)?;
+        T::from_issuance(txn, self, &asset, issue_data)
     }
 
     /// Issue a new RGB NIA asset with the provided `ticker`, `name`, `precision` and `amounts`,
@@ -272,9 +338,14 @@ impl Wallet {
         precision: u8,
         amounts: Vec<u64>,
     ) -> Result<AssetNIA, Error> {
-        self.issue_asset_nia_with_impl(ticker, name, precision, amounts, |issue_data| {
-            self.finalize_offline_issuance(&issue_data)
-        })
+        info!(self.logger(), "Issuing NIA...");
+        let txn = self.database().begin_transaction()?;
+        let issue_data = self.create_nia_contract(&txn, ticker, name, precision, amounts)?;
+        let res = self.finalize_offline_issuance(&txn, &issue_data)?;
+        self.update_backup_info(&txn, false)?;
+        txn.commit()?;
+        info!(self.logger(), "Issue asset NIA completed");
+        Ok(res)
     }
 
     /// Issue a new RGB UDA asset with the provided `ticker`, `name`, optional `details` and
@@ -294,31 +365,22 @@ impl Wallet {
         media_file_path: Option<String>,
         attachments_file_paths: Vec<String>,
     ) -> Result<AssetUDA, Error> {
-        self.issue_asset_uda_with_impl(
+        info!(self.logger(), "Issuing UDA...");
+        let txn = self.database().begin_transaction()?;
+        let issue_data = self.create_uda_contract(
+            &txn,
             ticker,
             name,
             details,
             precision,
             media_file_path,
             attachments_file_paths,
-            |issue_data| {
-                let mut runtime = self.rgb_runtime()?;
-                let asset = self.import_and_save_contract(&issue_data, &mut runtime)?;
-                let asset_uda = AssetUDA::get_asset_details(
-                    self,
-                    &asset,
-                    issue_data.asset_data.token.map(|t| t.into()),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                )?;
-                self.update_backup_info(false)?;
-                Ok(asset_uda)
-            },
-        )
+        )?;
+        let res = self.finalize_offline_issuance(&txn, &issue_data)?;
+        self.update_backup_info(&txn, false)?;
+        txn.commit()?;
+        info!(self.logger(), "Issue asset UDA completed");
+        Ok(res)
     }
 
     /// Issue a new RGB CFA asset with the provided `name`, optional `details`, `precision` and
@@ -340,9 +402,15 @@ impl Wallet {
         amounts: Vec<u64>,
         file_path: Option<String>,
     ) -> Result<AssetCFA, Error> {
-        self.issue_asset_cfa_with_impl(name, details, precision, amounts, file_path, |issue_data| {
-            self.finalize_offline_issuance(&issue_data)
-        })
+        info!(self.logger(), "Issuing CFA...");
+        let txn = self.database().begin_transaction()?;
+        let issue_data =
+            self.create_cfa_contract(&txn, name, details, precision, amounts, file_path)?;
+        let res = self.finalize_offline_issuance(&txn, &issue_data)?;
+        self.update_backup_info(&txn, false)?;
+        txn.commit()?;
+        info!(self.logger(), "Issue asset CFA completed");
+        Ok(res)
     }
 
     /// Issue a new RGB IFA asset with the provided `ticker`, `name`, `precision`, `amounts` and
@@ -365,15 +433,22 @@ impl Wallet {
         inflation_amounts: Vec<u64>,
         reject_list_url: Option<String>,
     ) -> Result<AssetIFA, Error> {
-        self.issue_asset_ifa_with_impl(
+        info!(self.logger(), "Issuing IFA...");
+        let txn = self.database().begin_transaction()?;
+        let issue_data = self.create_ifa_contract(
+            &txn,
             ticker,
             name,
             precision,
             amounts,
             inflation_amounts,
             reject_list_url,
-            |issue_data| self.finalize_offline_issuance(&issue_data),
-        )
+        )?;
+        let res = self.finalize_offline_issuance(&txn, &issue_data)?;
+        self.update_backup_info(&txn, false)?;
+        txn.commit()?;
+        info!(self.logger(), "Issue asset IFA completed");
+        Ok(res)
     }
 
     /// Blind an UTXO to receive RGB assets and return the resulting [`ReceiveData`].
@@ -412,20 +487,19 @@ impl Wallet {
             asset_id,
             expiration_timestamp,
         );
-
+        let txn = self.database().begin_transaction()?;
         let receive_data_internal = self.create_receive_data(
+            &txn,
             asset_id,
             assignment,
             expiration_timestamp.map(|t| t as i64),
             transport_endpoints,
             RecipientType::Blind,
         )?;
-
         let batch_transfer_idx =
-            self.store_receive_transfer(&receive_data_internal, min_confirmations)?;
-
-        self.update_backup_info(false)?;
-
+            self.store_receive_transfer(&txn, &receive_data_internal, min_confirmations)?;
+        self.update_backup_info(&txn, false)?;
+        txn.commit()?;
         info!(self.logger(), "Blind receive completed");
         Ok(ReceiveData {
             invoice: receive_data_internal.invoice_string,
@@ -471,20 +545,19 @@ impl Wallet {
             asset_id,
             expiration_timestamp,
         );
-
+        let txn = self.database().begin_transaction()?;
         let receive_data_internal = self.create_receive_data(
+            &txn,
             asset_id,
             assignment,
             expiration_timestamp.map(|t| t as i64),
             transport_endpoints,
             RecipientType::Witness,
         )?;
-
         let batch_transfer_idx =
-            self.store_receive_transfer(&receive_data_internal, min_confirmations)?;
-
-        self.update_backup_info(false)?;
-
+            self.store_receive_transfer(&txn, &receive_data_internal, min_confirmations)?;
+        self.update_backup_info(&txn, false)?;
+        txn.commit()?;
         info!(self.logger(), "Witness receive completed");
         Ok(ReceiveData {
             invoice: receive_data_internal.invoice_string,
@@ -540,11 +613,13 @@ impl Wallet {
             &self.wallet_data().bitcoin_network,
             mnemonic_str,
             true,
+            WitnessVersion::Taproot,
         )?;
         let (vanilla_account_xprv, _) = derive_account_xprv_from_mnemonic(
             &self.wallet_data().bitcoin_network,
             mnemonic_str,
             false,
+            WitnessVersion::Taproot,
         )?;
         for (vout, output) in tx.output.iter().enumerate() {
             if !output.script_pubkey.is_p2tr() {
@@ -645,10 +720,13 @@ impl Wallet {
         info!(self.logger(), "Creating UTXOs...");
         self.check_xprv()?;
         self.check_online(online)?;
-        let mut psbt = self.create_utxos_begin_impl(up_to, num, size, fee_rate, skip_sync)?;
+        let txn = self.database().begin_transaction()?;
+        let mut psbt =
+            self.create_utxos_begin_impl(&txn, up_to, num, size, fee_rate, skip_sync, true)?;
         self.sign_psbt_impl(&mut psbt, None)?;
-        let res = self.create_utxos_end_impl(&psbt, skip_sync)?;
-        self.update_backup_info(false)?;
+        let res = self.create_utxos_end_impl(&txn, &psbt)?;
+        self.update_backup_info(&txn, false)?;
+        txn.commit()?;
         info!(self.logger(), "Create UTXOs completed");
         Ok(res)
     }
@@ -669,6 +747,11 @@ impl Wallet {
     /// UTXOs, the number is decremented by one until it is possible to complete the operation. If
     /// the number reaches zero, an error is returned.
     ///
+    /// If `dry_run` is true, the wallet does not reserve the selected vanilla TXOs. The returned
+    /// PSBT can still be signed and completed with
+    /// [`create_utxos_end`](Wallet::create_utxos_end) but concurrent vanilla operations may try
+    /// to spend the same inputs.
+    ///
     /// Signing of the returned PSBT needs to be carried out separately. The signed PSBT then needs
     /// to be fed to the [`create_utxos_end`](Wallet::create_utxos_end) function.
     ///
@@ -683,10 +766,17 @@ impl Wallet {
         size: Option<u32>,
         fee_rate: u64,
         skip_sync: bool,
+        dry_run: bool,
     ) -> Result<String, Error> {
         info!(self.logger(), "Creating UTXOs (begin)...");
         self.check_online(online)?;
-        let res = self.create_utxos_begin_impl(up_to, num, size, fee_rate, skip_sync)?;
+        let txn = self.database().begin_transaction()?;
+        let res =
+            self.create_utxos_begin_impl(&txn, up_to, num, size, fee_rate, skip_sync, dry_run)?;
+        if !dry_run {
+            self.update_backup_info(&txn, false)?;
+        }
+        txn.commit()?;
         info!(self.logger(), "Create UTXOs (begin) completed");
         Ok(res.to_string())
     }
@@ -698,38 +788,25 @@ impl Wallet {
     ///
     /// This doesn't require the wallet to have private keys.
     ///
-    /// Returns the number of created UTXOs, if `skip_sync` is set to true this will be 0.
-    pub fn create_utxos_end(
-        &mut self,
-        online: Online,
-        signed_psbt: String,
-        skip_sync: bool,
-    ) -> Result<u8, Error> {
+    /// Returns the number of created UTXOs.
+    pub fn create_utxos_end(&mut self, online: Online, signed_psbt: String) -> Result<u8, Error> {
         info!(self.logger(), "Creating UTXOs (end)...");
         self.check_online(online)?;
         let psbt = Psbt::from_str(&signed_psbt)?;
-        let res = self.create_utxos_end_impl(&psbt, skip_sync)?;
+        let txn = self.database().begin_transaction()?;
+        let res = self.create_utxos_end_impl(&txn, &psbt)?;
+        self.update_backup_info(&txn, false)?;
+        txn.commit()?;
         info!(self.logger(), "Create UTXOs (end) completed");
         Ok(res)
     }
 
     /// Return the existing or freshly generated wallet [`Online`] data.
     ///
-    /// Setting `skip_consistency_check` to false runs a check on UTXOs (BDK vs rgb-lib DB), assets
-    /// (RGB vs rgb-lib DB) and medias (DB vs actual files) to try and detect possible
-    /// inconsistencies in the wallet.
-    /// Setting `skip_consistency_check` to true bypasses the check and allows operating an
-    /// inconsistent wallet.
-    ///
-    /// <div class="warning">Warning: setting <tt>skip_consistency_check</tt> to true is dangerous,
-    /// only do this if you know what you're doing!</div>
-    pub fn go_online(
-        &mut self,
-        skip_consistency_check: bool,
-        indexer_url: String,
-    ) -> Result<Online, Error> {
+    /// See [`OnlineOptions`] for details on the available options.
+    pub fn go_online(&mut self, online_options: OnlineOptions) -> Result<Online, Error> {
         info!(self.logger(), "Going online...");
-        let online = self.go_online_impl(skip_consistency_check, &indexer_url)?;
+        let online = self.go_online_impl(&online_options)?;
         info!(self.logger(), "Go online completed");
         Ok(online)
     }
@@ -744,30 +821,31 @@ impl Wallet {
         &mut self,
         online: Online,
         address: String,
-        destroy_assets: bool,
         fee_rate: u64,
     ) -> Result<String, Error> {
-        info!(
-            self.logger(),
-            "Draining to '{}' destroying asset '{}'...", address, destroy_assets
-        );
+        info!(self.logger(), "Draining to '{}'...", address);
         self.check_xprv()?;
         self.check_online(online)?;
-        let mut psbt = self.drain_to_begin_impl(address, destroy_assets, fee_rate)?;
+        let txn = self.database().begin_transaction()?;
+        let mut psbt = self.drain_to_begin_impl(&txn, address, fee_rate, true)?;
         self.sign_psbt_impl(&mut psbt, None)?;
-        let tx = self.drain_to_end_impl(&psbt)?;
-        self.update_backup_info(false)?;
+        let tx = self.drain_to_end_impl(&txn, &psbt)?;
+        self.update_backup_info(&txn, false)?;
+        txn.commit()?;
         info!(self.logger(), "Drain completed");
         Ok(tx.compute_txid().to_string())
     }
 
-    /// Prepare the PSBT to send bitcoin funds not in use for RGB allocations, or all funds if
-    /// `destroy_assets` is set to true, to the provided Bitcoin `address` with the provided
+    /// Prepare the PSBT to send all bitcoin funds to the provided `address` with the provided
     /// `fee_rate` (in sat/vB).
     ///
-    /// <div class="warning">Warning: setting <code>destroy_assets</code> to true is dangerous,
-    /// only do this if you know what you're doing! After destroying assets the wallet's RGB state
-    /// could be compromised and therefore the wallet should not be used anymore.</div>
+    /// <div class="warning">Warning: draining all funds is a destructive and irreversible
+    /// operation, only do this if you know what you're doing! After draining the wallet will not
+    /// be usable anymore.</div>
+    ///
+    /// If `dry_run` is true, the wallet does not reserve the selected vanilla TXOs. The returned
+    /// PSBT can still be signed and completed with [`drain_to_end`](Wallet::drain_to_end) but
+    /// concurrent vanilla operations may try to spend the same inputs.
     ///
     /// Signing of the returned PSBT needs to be carried out separately. The signed PSBT then needs
     /// to be fed to the [`drain_to_end`](Wallet::drain_to_end) function.
@@ -779,15 +857,17 @@ impl Wallet {
         &mut self,
         online: Online,
         address: String,
-        destroy_assets: bool,
         fee_rate: u64,
+        dry_run: bool,
     ) -> Result<String, Error> {
-        info!(
-            self.logger(),
-            "Draining (begin) to '{}' destroying asset '{}'...", address, destroy_assets
-        );
+        info!(self.logger(), "Draining (begin) to '{}'...", address);
         self.check_online(online)?;
-        let psbt = self.drain_to_begin_impl(address, destroy_assets, fee_rate)?;
+        let txn = self.database().begin_transaction()?;
+        let psbt = self.drain_to_begin_impl(&txn, address, fee_rate, dry_run)?;
+        if !dry_run {
+            self.update_backup_info(&txn, false)?;
+        }
+        txn.commit()?;
         info!(self.logger(), "Drain (begin) completed");
         Ok(psbt.to_string())
     }
@@ -804,8 +884,10 @@ impl Wallet {
         info!(self.logger(), "Draining (end)...");
         self.check_online(online)?;
         let psbt = Psbt::from_str(&signed_psbt)?;
-        let tx = self.drain_to_end_impl(&psbt)?;
-        self.update_backup_info(false)?;
+        let txn = self.database().begin_transaction()?;
+        let tx = self.drain_to_end_impl(&txn, &psbt)?;
+        self.update_backup_info(&txn, false)?;
+        txn.commit()?;
         info!(self.logger(), "Drain (end) completed");
         Ok(tx.compute_txid().to_string())
     }
@@ -824,12 +906,13 @@ impl Wallet {
         fee_rate: u64,
         min_confirmations: u8,
         expiration_timestamp: Option<u64>,
-        skip_sync: bool,
     ) -> Result<OperationResult, Error> {
         info!(self.logger(), "Sending to: {:?}...", recipient_map);
         self.check_xprv()?;
         self.check_online(online)?;
+        let txn = self.database().begin_transaction()?;
         let mut begin_op_data = self.send_begin_impl(
+            &txn,
             recipient_map,
             donation,
             fee_rate,
@@ -838,8 +921,9 @@ impl Wallet {
             true,
         )?;
         self.sign_psbt_impl(&mut begin_op_data.psbt, None)?;
-        let res = self.send_end_impl(&begin_op_data.psbt, skip_sync)?;
-        self.update_backup_info(false)?;
+        let res = self.send_end_impl(&txn, &begin_op_data.psbt)?;
+        self.update_backup_info(&txn, false)?;
+        txn.commit()?;
         info!(self.logger(), "Send completed");
         Ok(res)
     }
@@ -872,6 +956,9 @@ impl Wallet {
     /// produced. [`send_end`](Wallet::send_end) can still complete the operation and will persist
     /// the transfer.
     ///
+    /// This API requires to be online since it checks the validity and reachability of the
+    /// transport endpoints.
+    ///
     /// Signing of the returned PSBT needs to be carried out separately. The signed PSBT then needs
     /// to be fed to the [`send_end`](Wallet::send_end) function to complete the send operation.
     ///
@@ -890,7 +977,9 @@ impl Wallet {
     ) -> Result<SendBeginResult, Error> {
         info!(self.logger(), "Sending (begin) to: {:?}...", recipient_map);
         self.check_online(online)?;
+        let txn = self.database().begin_transaction()?;
         let begin_op_data = self.send_begin_impl(
+            &txn,
             recipient_map,
             donation,
             fee_rate,
@@ -898,7 +987,10 @@ impl Wallet {
             expiration_timestamp.map(|t| t as i64),
             dry_run,
         )?;
-        self.update_backup_info(false)?;
+        if !dry_run {
+            self.update_backup_info(&txn, false)?;
+        }
+        txn.commit()?;
         info!(self.logger(), "Send (begin) completed");
         Ok(SendBeginResult {
             psbt: begin_op_data.psbt.to_string(),
@@ -929,13 +1021,14 @@ impl Wallet {
         &mut self,
         online: Online,
         signed_psbt: String,
-        skip_sync: bool,
     ) -> Result<OperationResult, Error> {
         info!(self.logger(), "Sending (end)...");
         self.check_online(online)?;
         let psbt = Psbt::from_str(&signed_psbt)?;
-        let res = self.send_end_impl(&psbt, skip_sync)?;
-        self.update_backup_info(false)?;
+        let txn = self.database().begin_transaction()?;
+        let res = self.send_end_impl(&txn, &psbt)?;
+        self.update_backup_info(&txn, false)?;
+        txn.commit()?;
         info!(self.logger(), "Send (end) completed");
         Ok(res)
     }
@@ -957,15 +1050,23 @@ impl Wallet {
         info!(self.logger(), "Sending BTC...");
         self.check_xprv()?;
         self.check_online(online)?;
-        let mut psbt = self.send_btc_begin_impl(address, amount, fee_rate, skip_sync)?;
+        let txn = self.database().begin_transaction()?;
+        let mut psbt =
+            self.send_btc_begin_impl(&txn, address, amount, fee_rate, skip_sync, true)?;
         self.sign_psbt_impl(&mut psbt, None)?;
-        let res = self.send_btc_end_impl(&psbt, skip_sync)?;
+        let res = self.send_btc_end_impl(&txn, &psbt)?;
+        self.update_backup_info(&txn, false)?;
+        txn.commit()?;
         info!(self.logger(), "Send BTC completed");
         Ok(res)
     }
 
     /// Prepare the PSBT to send the specified `amount` of bitcoins (in sats) using the vanilla
     /// wallet to the specified Bitcoin `address` with the specified `fee_rate` (in sat/vB).
+    ///
+    /// If `dry_run` is true, the wallet does not reserve the selected vanilla TXOs. The returned
+    /// PSBT can still be signed and completed with [`send_btc_end`](Wallet::send_btc_end) but
+    /// concurrent vanilla operations may try to spend the same inputs.
     ///
     /// Signing of the returned PSBT needs to be carried out separately. The signed PSBT then needs
     /// to be fed to the [`send_btc_end`](Wallet::send_btc_end) function.
@@ -980,10 +1081,16 @@ impl Wallet {
         amount: u64,
         fee_rate: u64,
         skip_sync: bool,
+        dry_run: bool,
     ) -> Result<String, Error> {
         info!(self.logger(), "Sending BTC (begin)...");
         self.check_online(online)?;
-        let res = self.send_btc_begin_impl(address, amount, fee_rate, skip_sync)?;
+        let txn = self.database().begin_transaction()?;
+        let res = self.send_btc_begin_impl(&txn, address, amount, fee_rate, skip_sync, dry_run)?;
+        if !dry_run {
+            self.update_backup_info(&txn, false)?;
+        }
+        txn.commit()?;
         info!(self.logger(), "Send BTC (begin) completed");
         Ok(res.to_string())
     }
@@ -996,16 +1103,14 @@ impl Wallet {
     /// This doesn't require the wallet to have private keys.
     ///
     /// Returns the TXID of the broadcasted transaction.
-    pub fn send_btc_end(
-        &mut self,
-        online: Online,
-        signed_psbt: String,
-        skip_sync: bool,
-    ) -> Result<String, Error> {
+    pub fn send_btc_end(&mut self, online: Online, signed_psbt: String) -> Result<String, Error> {
         info!(self.logger(), "Sending BTC (end)...");
         self.check_online(online)?;
         let psbt = Psbt::from_str(&signed_psbt)?;
-        let res = self.send_btc_end_impl(&psbt, skip_sync)?;
+        let txn = self.database().begin_transaction()?;
+        let res = self.send_btc_end_impl(&txn, &psbt)?;
+        self.update_backup_info(&txn, false)?;
+        txn.commit()?;
         info!(self.logger(), "Send BTC (end) completed");
         Ok(res)
     }
@@ -1030,7 +1135,9 @@ impl Wallet {
         );
         self.check_xprv()?;
         self.check_online(online)?;
+        let txn = self.database().begin_transaction()?;
         let mut begin_op_data = self.inflate_begin_impl(
+            &txn,
             asset_id,
             inflation_amounts,
             fee_rate,
@@ -1038,8 +1145,9 @@ impl Wallet {
             true,
         )?;
         self.sign_psbt_impl(&mut begin_op_data.psbt, None)?;
-        let res = self.inflate_end_impl(&begin_op_data.psbt)?;
-        self.update_backup_info(false)?;
+        let res = self.inflate_end_impl(&txn, &begin_op_data.psbt)?;
+        self.update_backup_info(&txn, false)?;
+        txn.commit()?;
         info!(self.logger(), "Inflate completed");
         Ok(res)
     }
@@ -1081,14 +1189,19 @@ impl Wallet {
             "Inflating (begin) amounts: {:?}...", inflation_amounts
         );
         self.check_online(online)?;
+        let txn = self.database().begin_transaction()?;
         let begin_operation_data = self.inflate_begin_impl(
+            &txn,
             asset_id,
             inflation_amounts,
             fee_rate,
             min_confirmations,
             dry_run,
         )?;
-        self.update_backup_info(false)?;
+        if !dry_run {
+            self.update_backup_info(&txn, false)?;
+        }
+        txn.commit()?;
         info!(self.logger(), "Inflate (begin) completed");
         Ok(InflateBeginResult {
             psbt: begin_operation_data.psbt.to_string(),
@@ -1113,8 +1226,6 @@ impl Wallet {
     ///
     /// This doesn't require the wallet to have private keys.
     ///
-    /// The API syncs and doesn't provide a way to skip that.
-    ///
     /// Returns a [`OperationResult`].
     pub fn inflate_end(
         &mut self,
@@ -1124,9 +1235,114 @@ impl Wallet {
         info!(self.logger(), "Inflating (end)...");
         self.check_online(online)?;
         let psbt = Psbt::from_str(&signed_psbt)?;
-        let res = self.inflate_end_impl(&psbt)?;
-        self.update_backup_info(false)?;
+        let txn = self.database().begin_transaction()?;
+        let res = self.inflate_end_impl(&txn, &psbt)?;
+        self.update_backup_info(&txn, false)?;
+        txn.commit()?;
         info!(self.logger(), "Inflate (end) completed");
+        Ok(res)
+    }
+
+    /// Burn RGB assets.
+    ///
+    /// This calls [`burn_begin`](Wallet::burn_begin), signs the resulting PSBT and finally
+    /// calls [`burn_end`](Wallet::burn_end).
+    ///
+    /// A wallet with private keys is required.
+    pub fn burn(
+        &mut self,
+        online: Online,
+        asset_id: String,
+        amount: u64,
+        fee_rate: u64,
+        min_confirmations: u8,
+    ) -> Result<OperationResult, Error> {
+        info!(self.logger(), "Burning amount: {}...", amount);
+        self.check_xprv()?;
+        self.check_online(online)?;
+        let txn = self.database().begin_transaction()?;
+        let mut begin_op_data =
+            self.burn_begin_impl(&txn, asset_id, amount, fee_rate, min_confirmations, true)?;
+        self.sign_psbt_impl(&mut begin_op_data.psbt, None)?;
+        let res = self.burn_end_impl(&txn, &begin_op_data.psbt)?;
+        self.update_backup_info(&txn, false)?;
+        txn.commit()?;
+        info!(self.logger(), "Burn completed");
+        Ok(res)
+    }
+
+    /// Prepare the PSBT to burn RGB assets according to the given amount, with the provided
+    /// `fee_rate` (in sat/vB).
+    ///
+    /// The amount of assets to burn is specified by the `amount` parameter and cannot be zero.
+    ///
+    /// If `dry_run` is true, the wallet does not persist the transfer in
+    /// [`TransferStatus::Initiated`]. The returned [`BurnBeginResult::batch_transfer_idx`] is None
+    /// in that case. The PSBT and on-disk transfer data under the wallet directory are still
+    /// produced. [`burn_end`](Wallet::burn_end) can still complete the operation and will persist
+    /// the transfer.
+    ///
+    /// Signing of the returned PSBT needs to be carried out separately. The signed PSBT then needs
+    /// to be fed to the [`burn_end`](Wallet::burn_end) function for broadcasting.
+    ///
+    /// This doesn't require the wallet to have private keys.
+    ///
+    /// Returns a PSBT ready to be signed and operation details.
+    pub fn burn_begin(
+        &mut self,
+        online: Online,
+        asset_id: String,
+        amount: u64,
+        fee_rate: u64,
+        min_confirmations: u8,
+        dry_run: bool,
+    ) -> Result<BurnBeginResult, Error> {
+        info!(self.logger(), "Burning (begin) amount: {}...", amount);
+        self.check_online(online)?;
+        let txn = self.database().begin_transaction()?;
+        let begin_operation_data =
+            self.burn_begin_impl(&txn, asset_id, amount, fee_rate, min_confirmations, dry_run)?;
+        if !dry_run {
+            self.update_backup_info(&txn, false)?;
+        }
+        txn.commit()?;
+        info!(self.logger(), "Burn (begin) completed");
+        Ok(BurnBeginResult {
+            psbt: begin_operation_data.psbt.to_string(),
+            batch_transfer_idx: begin_operation_data.batch_transfer_idx,
+            details: BurnDetails {
+                fascia_path: begin_operation_data
+                    .transfer_dir
+                    .join(FASCIA_FILE)
+                    .to_string_lossy()
+                    .to_string(),
+                min_confirmations,
+                entropy: begin_operation_data.info_batch_transfer.entropy,
+            },
+        })
+    }
+
+    /// Complete the burn operation by broadcasting the provided PSBT and saving the transfer to DB.
+    ///
+    /// The provided PSBT, prepared with the [`burn_begin`](Wallet::burn_begin) function, needs to
+    /// have already been signed.
+    ///
+    /// This doesn't require the wallet to have private keys.
+    ///
+    /// Returns a [`OperationResult`].
+    pub fn burn_end(
+        &mut self,
+        online: Online,
+        signed_psbt: String,
+    ) -> Result<OperationResult, Error> {
+        info!(self.logger(), "Burning (end)...");
+        self.check_online(online)?;
+        let psbt = Psbt::from_str(&signed_psbt)?;
+        let txn = self.database().begin_transaction()?;
+        let res = self.burn_end_impl(&txn, &psbt)?;
+        self.update_backup_info(&txn, false)?;
+        txn.commit()?;
+        info!(self.logger(), "Burn (end) completed");
         Ok(res)
     }
 }

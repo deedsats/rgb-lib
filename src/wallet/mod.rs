@@ -21,22 +21,24 @@ pub use backup::restore_backup;
 pub use multisig::{Cosigner, MultisigKeys, MultisigWallet};
 #[cfg(any(feature = "electrum", feature = "esplora"))]
 pub use multisig::{
-    HubInfo, InitOperationResult, MultisigVotingStatus, Operation, OperationInfo,
-    RespondToOperation, UserRole,
+    HubInfo, InitOperationResult, MultisigOnlineOptions, MultisigVotingStatus, Operation,
+    OperationInfo, RespondToOperation, UserRole,
 };
 pub use objects::{
     Address, AssetCFA, AssetIFA, AssetNIA, AssetUDA, Assets, AssignmentsCollection, Balance,
     BlockTime, BtcBalance, DatabaseType, EmbeddedMedia, Invoice, InvoiceData, Media, Metadata,
-    Online, Outpoint, ProofOfReserves, PsbtInputInfo, PsbtInspection, PsbtOutputInfo, ReceiveData,
-    Recipient, RecipientInfo, RecipientType, RgbAllocation, RgbInputInfo, RgbInspection,
-    RgbOperationInfo, RgbOutputInfo, RgbTransitionInfo, Token, TokenLight, Transaction,
-    TransactionType, Transfer, TransferKind, TransferTransportEndpoint, TransportEndpoint,
-    TypeOfTransition, Unspent, Utxo, UtxoSignature, WalletData, WalletDescriptors, WitnessData,
+    Online, Outpoint, PendingVanillaTx, ProofOfReserves, PsbtInputInfo, PsbtInspection,
+    PsbtOutputInfo, ReceiveData, Recipient, RecipientInfo, RecipientType, RgbAllocation,
+    RgbInputInfo, RgbInspection, RgbOperationInfo, RgbOutputInfo, RgbTransitionInfo, Token,
+    TokenLight, Transaction, TransactionType, Transfer, TransferKind, TransferTransportEndpoint,
+    TransportEndpoint, TypeOfTransition, Unspent, Utxo, UtxoSignature, WalletData,
+    WalletDescriptors, WitnessData,
 };
 #[cfg(any(feature = "electrum", feature = "esplora"))]
 pub use objects::{
-    InflateBeginResult, InflateDetails, OperationResult, RefreshFilter, RefreshResult,
-    RefreshTransferStatus, RefreshedTransfer, SendBeginResult, SendDetails,
+    BurnBeginResult, BurnDetails, InflateBeginResult, InflateDetails, OnlineOptions,
+    OperationResult, RefreshFilter, RefreshResult, RefreshTransferStatus, RefreshedTransfer,
+    SendBeginResult, SendDetails,
 };
 pub use offline::RgbWalletOpsOffline;
 #[cfg(any(feature = "electrum", feature = "esplora"))]
@@ -49,12 +51,15 @@ pub(crate) use core::{
     setup_new_wallet, setup_rgb,
 };
 #[cfg(any(feature = "electrum", feature = "esplora"))]
+pub use core::{SyncKeychain, SyncOptions, SyncStrategy};
+#[cfg(any(feature = "electrum", feature = "esplora"))]
 pub(crate) use indexer::Indexer;
 #[cfg(any(feature = "electrum", feature = "esplora"))]
 pub(crate) use objects::{
-    AssetInfo, AssetSpend, BeginOperationData, BtcChange, LocalRecipient, LocalRecipientData,
-    LocalWitnessData, OnlineData, PrepareRgbPsbtResult, PrepareTransferPsbtResult,
-    RefreshResultTrait,
+    AssetInfo, AssetSpend, BeginOperationData, BtcChange, FailTransfersOutcome, LocalRecipient,
+    LocalRecipientData, LocalWitnessData, OnlineData, PrepareRgbPsbtResult,
+    PrepareTransferPsbtResult, ReceivedConsignmentMeta, RefreshResultTrait,
+    TryFailBatchTransferOutcome,
 };
 pub(crate) use objects::{
     InfoAssetTransfer, InfoBatchTransfer, IssueData, IssuedAssetDetails, LocalAssetData,
@@ -71,6 +76,7 @@ use super::*;
 
 pub(crate) const CONSIGNMENT_FILE: &str = "consignment_out";
 pub(crate) const FASCIA_FILE: &str = "fascia";
+pub(crate) const UNSIGNED_PSBT_FILE: &str = "unsigned.psbt";
 
 pub(crate) const SCHEMA_ID_NIA: &str =
     "rgb:sch:RWhwUfTMpuP2Zfx1~j4nswCANGeJrYOqDcKelaMV4zU#remote-digital-pegasus";
@@ -79,7 +85,7 @@ pub(crate) const SCHEMA_ID_UDA: &str =
 pub(crate) const SCHEMA_ID_CFA: &str =
     "rgb:sch:JgqK5hJX9YBT4osCV7VcW_iLTcA5csUCnLzvaKTTrNY#mars-house-friend";
 pub(crate) const SCHEMA_ID_IFA: &str =
-    "rgb:sch:p6H_wtDgei9HHUVLjKW0tNdHHFLhfHxrn9QX_QQUE78#scale-year-shave";
+    "rgb:sch:IpjJhFLz3oywYKQxO3KmFgR0Aa415nlTNrNyEFqMZCE#shoe-colombo-mango";
 
 pub(crate) const RGB_STATE_ASSET_OWNER: &str = "assetOwner";
 pub(crate) const RGB_STATE_INFLATION_ALLOWANCE: &str = "inflationAllowance";
@@ -87,3 +93,7 @@ pub(crate) const RGB_GLOBAL_ISSUED_SUPPLY: &str = "issuedSupply";
 pub(crate) const RGB_GLOBAL_REJECT_LIST_URL: &str = "rejectListUrl";
 #[cfg(any(feature = "electrum", feature = "esplora"))]
 pub(crate) const RGB_METADATA_ALLOWED_INFLATION: &str = "allowedInflation";
+#[cfg(any(feature = "electrum", feature = "esplora"))]
+pub(crate) const RGB_METADATA_BURNED_ASSET: &str = "burnedAsset";
+#[cfg(any(feature = "electrum", feature = "esplora"))]
+pub(crate) const RGB_METADATA_BURNED_INFLATION: &str = "burnedInflation";

@@ -30,10 +30,9 @@ use crate::wallet::{
     utils::build_indexer,
 };
 use crate::{
-    database::entities::transfer_transport_endpoint,
     keys::{Keys, generate_keys},
     utils::{
-        KEYCHAIN_BTC, KEYCHAIN_RGB, RGB_RUNTIME_DIR, block_on, get_account_data,
+        KEYCHAIN_BTC, KEYCHAIN_RGB, RGB_RUNTIME_DIR, get_account_data,
         get_account_derivation_children, get_coin_type, get_extended_derivation_path,
         recipient_id_from_script_buf, script_buf_from_recipient_id,
     },
@@ -85,6 +84,8 @@ const TINY_BTC_AMOUNT: u32 = 330;
 const QUEUE_DEPTH_EXCEEDED: &str = "Work queue depth exceeded";
 const DURATION_RCV_TRANSFER: u32 = 86400;
 const DURATION_SEND_TRANSFER: u32 = 3600;
+#[cfg(any(feature = "electrum", feature = "esplora"))]
+pub(crate) const INDEXER_SYNC_LOOKBACK: usize = 20;
 
 static INIT: Once = Once::new();
 
@@ -122,7 +123,7 @@ pub fn initialize() {
 }
 
 pub fn restart_multisig_hub() {
-    let serivce_name = "rgb-multisig-hub";
+    let service_name = "rgb-multisig-hub";
     let cmd_base = vec![s!("-f"), ["tests", "compose.yaml"].join(MAIN_SEPARATOR_STR)];
     let mut cmd = cmd_base.clone();
     cmd.extend([
@@ -130,7 +131,7 @@ pub fn restart_multisig_hub() {
         s!("-f"),
         s!("-s"),
         s!("-v"),
-        serivce_name.to_string(),
+        service_name.to_string(),
     ]);
     Command::new("docker")
         .stdin(Stdio::null())
@@ -150,7 +151,7 @@ pub fn restart_multisig_hub() {
         .output()
         .expect("failed to remove hub volume");
     let mut cmd = cmd_base.clone();
-    cmd.extend([s!("up"), s!("-d"), serivce_name.to_string()]);
+    cmd.extend([s!("up"), s!("-d"), service_name.to_string()]);
     Command::new("docker")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -163,32 +164,32 @@ pub fn restart_multisig_hub() {
 
 // the get_*_wallet! macros can be called with no arguments to use defaults
 #[cfg(any(feature = "electrum", feature = "esplora"))]
-macro_rules! get_empty_wallet {
+macro_rules! get_empty_party {
     ($i: expr) => {
-        get_empty_wallet(true, Some($i))
+        get_empty_party(true, Some($i))
     };
     () => {
-        get_empty_wallet(true, None)
+        get_empty_party(true, None)
     };
 }
 
 #[cfg(any(feature = "electrum", feature = "esplora"))]
-macro_rules! get_funded_noutxo_wallet {
+macro_rules! get_funded_noutxo_party {
     ($i: expr) => {
-        get_funded_noutxo_wallet(true, Some($i))
+        get_funded_noutxo_party(true, Some($i))
     };
     () => {
-        get_funded_noutxo_wallet(true, None)
+        get_funded_noutxo_party(true, None)
     };
 }
 
 #[cfg(any(feature = "electrum", feature = "esplora"))]
-macro_rules! get_funded_wallet {
+macro_rules! get_funded_party {
     ($i: expr) => {
-        get_funded_wallet(true, Some($i))
+        get_funded_party(true, Some($i))
     };
     () => {
-        get_funded_wallet(true, None)
+        get_funded_party(true, None)
     };
 }
 
@@ -296,12 +297,15 @@ pub fn mock_vout(vout: Option<u32>) -> Option<u32> {
 }
 
 // test utilities
+#[macro_use]
 mod utils;
 pub(crate) use utils::{api::*, chain::*, helpers::*};
 
 // API tests
+mod abort_pending_vanilla_tx;
 mod backup;
 mod blind_receive;
+mod burn;
 mod create_utxos;
 mod delete_transfers;
 mod drain_to;
@@ -321,6 +325,7 @@ mod issue_asset_ifa;
 mod issue_asset_nia;
 mod issue_asset_uda;
 mod list_assets;
+mod list_pending_vanilla_txs;
 mod list_transactions;
 mod list_transfers;
 mod list_unspents;
@@ -333,4 +338,5 @@ mod rust_only;
 mod send;
 mod send_btc;
 mod sign_psbt;
+mod sync;
 mod witness_receive;
