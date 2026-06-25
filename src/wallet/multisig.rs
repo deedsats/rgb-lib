@@ -240,7 +240,7 @@ impl WalletCore for MultisigWallet {
         reveal(KeychainKind::Internal, response.internal);
         reveal(KeychainKind::External, response.external);
         if persist {
-            bdk_wallet.persist(bdk_database)?;
+            block_on(bdk_wallet.persist_async(bdk_database))?;
         }
         // sync UTXOs
         self.sync_bdk_and_db_txos(txn, options, include_spent)
@@ -259,13 +259,15 @@ impl WalletOffline for MultisigWallet {
         let is_internal = keychain == KeychainKind::Internal;
         let start_index = self.hub_client().bump_address_indices(count, is_internal)?;
         let local_index = self.bdk_wallet().derivation_index(keychain).unwrap_or(0);
-        let target_index = start_index + count;
+        let target_index = start_index
+            .checked_add(count)
+            .expect("address derivation index cannot exceed u32::MAX");
         let (bdk_wallet, bdk_database) = self.bdk_wallet_db_mut();
         for _ in local_index..target_index {
             bdk_wallet.reveal_next_address(keychain);
         }
         let first_address = bdk_wallet.peek_address(keychain, start_index).address;
-        bdk_wallet.persist(bdk_database)?;
+        block_on(bdk_wallet.persist_async(bdk_database))?;
         Ok(first_address)
     }
 }
@@ -324,12 +326,12 @@ impl RgbWalletOpsOnline for MultisigWallet {
         no_asset_only: bool,
         skip_sync: bool,
     ) -> Result<bool, Error> {
+        self.check_online(online)?;
         self.check_is_cosigner()?;
         info!(
             self.logger(),
             "Failing batch transfer with idx {:?}...", batch_transfer_idx
         );
-        self.check_online(online)?;
         let txn = self.database().begin_transaction()?;
         let outcome =
             self.fail_transfers_impl(&txn, batch_transfer_idx, no_asset_only, skip_sync)?;
@@ -1826,7 +1828,10 @@ impl MultisigWallet {
 
         let op_idx = self.get_local_last_processed_operation_idx_impl(&txn)?;
         txn.commit()?;
-        let Some(op) = self.hub_client().get_operation_by_idx(op_idx + 1)? else {
+        let next_op_idx = op_idx
+            .checked_add(1)
+            .expect("operation index cannot exceed i32::MAX");
+        let Some(op) = self.hub_client().get_operation_by_idx(next_op_idx)? else {
             return Ok(None);
         };
 

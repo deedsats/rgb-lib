@@ -99,7 +99,7 @@ pub trait WalletOnline: WalletOffline {
         let seen_at = now().unix_timestamp() as u64;
         let (bdk_wallet, bdk_db) = self.bdk_wallet_db_mut();
         bdk_wallet.apply_unconfirmed_txs([(tx.clone(), seen_at)]);
-        bdk_wallet.persist(bdk_db)?;
+        block_on(bdk_wallet.persist_async(bdk_db))?;
 
         // promote any newly-known colored UTXOs (e.g. the change output) from
         // exists=false to exists=true in the rgb_lib DB
@@ -228,11 +228,14 @@ pub trait WalletOnline: WalletOffline {
 
         let mut utxos_to_create = num.unwrap_or(UTXO_NUM);
         if up_to {
-            let allocatable = self.get_available_allocations(unspents, &[], None)?.len() as u8;
-            if allocatable >= utxos_to_create {
+            let allocatable = self.get_available_allocations(unspents, &[], None)?.len();
+            // compare in usize since the count of allocatable UTXOs can exceed u8::MAX
+            if allocatable >= utxos_to_create as usize {
                 return Err(Error::AllocationsAlreadyAvailable);
             }
-            utxos_to_create -= allocatable
+            // allocatable < utxos_to_create <= u8::MAX, so the conversion cannot fail
+            utxos_to_create -=
+                u8::try_from(allocatable).expect("allocatable count cannot exceed u8::MAX");
         }
         debug!(
             self.logger(),
@@ -252,7 +255,10 @@ pub trait WalletOnline: WalletOffline {
                     (inputs, usable_btc_amount)
                 } else {
                     inputs.push(outpoint);
-                    (inputs, usable_btc_amount + value)
+                    let usable_btc_amount = usable_btc_amount
+                        .checked_add(value)
+                        .expect("total UTXO value cannot exceed u64::MAX");
+                    (inputs, usable_btc_amount)
                 }
             },
         );
@@ -1806,7 +1812,7 @@ pub trait WalletOnline: WalletOffline {
         }
 
         let mut assignments_collected = AssignmentsCollection::default();
-        let mut input_btc_amt = 0;
+        let mut input_btc_amt: u64 = 0;
         for unspent in mut_unspents {
             // get spendable allocations for the required asset
             let asset_allocations: Vec<LocalRgbAllocation> = unspent
@@ -1854,7 +1860,14 @@ pub trait WalletOnline: WalletOffline {
                 .for_each(|a| a.assignment.add_to_assignments(&mut assignments_collected));
             input_outpoints.push(unspent.utxo.outpoint());
 
-            input_btc_amt += unspent.utxo.btc_amount.parse::<u64>().unwrap();
+            let utxo_btc_amt = unspent
+                .utxo
+                .btc_amount
+                .parse::<u64>()
+                .expect("DB should contain a valid BTC amount");
+            input_btc_amt = input_btc_amt
+                .checked_add(utxo_btc_amt)
+                .expect("total input BTC value cannot exceed u64::MAX");
 
             // stop as soon as we have the needed assignments
             if assignments_collected.enough(assignments_needed) {
@@ -1958,7 +1971,12 @@ pub trait WalletOnline: WalletOffline {
                                     details: e.to_string(),
                                 })?;
                         }
-                        free_utxos.sort_by_key(|u| u.utxo.btc_amount.parse::<u64>().unwrap());
+                        free_utxos.sort_by_key(|u| {
+                            u.utxo
+                                .btc_amount
+                                .parse::<u64>()
+                                .expect("DB should contain a valid BTC amount")
+                        });
                     }
                     if let Some(a) = free_utxos.pop() {
                         all_inputs.insert(a.utxo.into());
@@ -2795,7 +2813,19 @@ pub trait WalletOnline: WalletOffline {
         status: TransferStatus,
         sync_tte_used: bool,
     ) -> Result<i32, Error> {
-        if let Some(existing) = txn.get_batch_transfer_by_txid(&txid)? {
+        // in a send-to-oneself, the txid is shared between send and receive transfers; only the
+        // outgoing batch transfer should be updated here, incoming ones must be ignored so the send
+        // transfers are created
+        let existing = match txn.get_batch_transfer_by_txid(&txid)? {
+            Some(batch_transfer) => {
+                let asset_transfers = txn.iter_asset_transfers()?;
+                let transfers = txn.iter_transfers()?;
+                let outgoing = !batch_transfer.incoming(&asset_transfers, &transfers);
+                outgoing.then_some(batch_transfer)
+            }
+            None => None,
+        };
+        if let Some(existing) = existing {
             let mut updated: DbBatchTransferActMod = existing.clone().into();
             updated.status = ActiveValue::Set(status);
             txn.update_batch_transfer(&mut updated)?;
@@ -3276,6 +3306,16 @@ pub trait WalletOnline: WalletOffline {
             )?
         };
 
+        // test-only: simulate a wallet crash after the consignment has been posted to
+        // the proxy and the transfer has been saved, but before the enclosing DB transaction
+        // is committed, so the save is rolled back while the proxy keeps the consignment.
+        #[cfg(test)]
+        if mock_send_end_crash() {
+            return Err(Error::Internal {
+                details: s!("simulated wallet crash in send_end"),
+            });
+        }
+
         Ok(OperationResult {
             txid,
             batch_transfer_idx,
@@ -3490,13 +3530,15 @@ pub trait WalletOnline: WalletOffline {
         let (asset_id, transfer_info) = info_contents.transfers.into_iter().next().unwrap();
         let inflation = transfer_info.original_assignments_needed.inflation;
         let db_asset = txn.get_asset(asset_id).unwrap().unwrap();
-        let updated_known_circulating_supply = db_asset
+        let known_circulating_supply = db_asset
             .known_circulating_supply
             .as_ref()
             .unwrap()
             .parse::<u64>()
-            .unwrap()
-            + inflation;
+            .expect("DB should contain a valid known circulating supply");
+        let updated_known_circulating_supply = known_circulating_supply
+            .checked_add(inflation)
+            .expect("known circulating supply plus inflation cannot exceed u64::MAX");
         let mut updated_asset: DbAssetActMod = db_asset.into();
         updated_asset.known_circulating_supply =
             ActiveValue::Set(Some(updated_known_circulating_supply.to_string()));

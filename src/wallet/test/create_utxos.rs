@@ -170,8 +170,37 @@ fn up_to_allocation_checks() {
 fn fail() {
     initialize();
 
-    // cannot create UTXOs for an empty wallet
+    // === offline tests
+
+    let mut offline_party = {
+        let wallet = get_test_wallet(true, None);
+        party!(wallet, Online { id: 0 })
+    };
+    let result =
+        offline_party
+            .wallet
+            .create_utxos(Online { id: 0 }, true, None, None, FEE_RATE, false);
+    assert_matches!(result, Err(Error::Offline));
+    let result = offline_party.wallet.create_utxos_begin(
+        Online { id: 0 },
+        true,
+        None,
+        None,
+        FEE_RATE,
+        false,
+        false,
+    );
+    assert_matches!(result, Err(Error::Offline));
+    let result = offline_party
+        .wallet
+        .create_utxos_end(Online { id: 0 }, s!(""));
+    assert_matches!(result, Err(Error::Offline));
+
+    // === online tests
+
     let mut party = get_empty_party!();
+
+    // cannot create UTXOs for an empty wallet
     let result = party
         .wallet
         .create_utxos(party.online, true, None, None, FEE_RATE, false);
@@ -240,6 +269,33 @@ fn casting() {
     party.create_utxos(true, None, Some(utxo_size), FEE_RATE, None);
     let unspents = party.list_unspents(false);
     assert_eq!(unspents.len(), (UTXO_NUM + 1) as usize);
+}
+
+#[cfg(feature = "electrum")]
+#[test]
+#[parallel]
+fn up_to_allocatable_above_u8_max() {
+    initialize();
+
+    let mut party = get_empty_party!();
+    fund_wallet(party.get_address());
+
+    // create 256 allocatable UTXOs; num is u8 so it takes two calls
+    party.create_utxos(false, Some(255), None, FEE_RATE, Some(255));
+    party.create_utxos(false, Some(1), None, FEE_RATE, Some(1));
+    let colorable = party
+        .list_unspents(false)
+        .iter()
+        .filter(|u| u.utxo.colorable)
+        .count();
+    assert_eq!(colorable, 256);
+
+    // when up_to is true, detect that the required num (u8) of allocations is already available
+    // and reject creation, even with more than u8::MAX already available allocations
+    let result = party
+        .wallet
+        .create_utxos(party.online, true, Some(1), None, FEE_RATE, false);
+    assert_matches!(result, Err(Error::AllocationsAlreadyAvailable));
 }
 
 #[cfg(feature = "electrum")]

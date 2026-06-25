@@ -90,6 +90,7 @@ interface RgbLibError {
   NoInflationAmounts();
   NoIssuanceAmounts();
   NoKeysSupplied();
+  NoMaxAllocationsPerUtxo();
   NoSupportedSchemas();
   NoValidTransportEndpoint();
   Offline();
@@ -459,6 +460,7 @@ dictionary RefreshedTransfer {
 [Remote]
 enum RefreshTransferStatus {
   "WaitingCounterparty",
+  "WaitingSafeHeight",
   "WaitingConfirmations",
 };
 

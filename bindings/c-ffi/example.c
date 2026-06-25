@@ -78,8 +78,10 @@ int main() {
     printf("BTC balance: %s\n", btc_balance_1);
 
     printf("Wallet is going online...\n");
-    CResultString online_res =
-        rgblib_go_online(wlt, false, "tcp://localhost:50001");
+    const char *online_options =
+        "{ \"indexer_url\": \"tcp://localhost:50001\", "
+        "\"skip_consistency_check\": false, \"vanilla_sync_lookback\": 20 }";
+    CResultString online_res = rgblib_go_online(wlt, online_options);
     if (online_res.result == Err) {
         printf("ERR: %s\n", online_res.inner);
         return EXIT_FAILURE;
@@ -164,7 +166,7 @@ int main() {
     }
 
     CResultString sync_res = rgblib_sync(
-        wlt, online, "{\"keychain\":\"Colored\",\"type\":\"FullSync\"}");
+        wlt, online, "{\"keychain\":\"Colored\",\"strategy\":\"FullSync\"}");
     if (sync_res.result == Ok) {
         printf("Synced\n");
     } else {

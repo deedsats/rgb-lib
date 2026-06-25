@@ -310,11 +310,13 @@ fn success() {
         &[&wlt_1, &wlt_2, &wlt_3],
         &[Some(&uda_asset.asset_id)],
         None,
+        None,
         TransferStatus::Settled,
     );
     check_transfer_status(
         &[&singlesig_wlt],
         &[Some(&uda_asset.asset_id)],
+        None,
         None,
         TransferStatus::Settled,
     );
@@ -351,11 +353,13 @@ fn success() {
         &[&wlt_1, &wlt_2, &wlt_3],
         &[Some(&uda_asset.asset_id)],
         None,
+        None,
         TransferStatus::Settled,
     );
     check_transfer_status(
         &[&singlesig_wlt],
         &[Some(&uda_asset.asset_id)],
+        None,
         None,
         TransferStatus::Settled,
     );
@@ -434,11 +438,13 @@ fn success() {
         &[&wlt_1, &wlt_2, &wlt_3],
         &[Some(&uda_asset.asset_id)],
         None,
+        None,
         TransferStatus::Settled,
     );
     check_transfer_status(
         &[&singlesig_wlt],
         &[Some(&uda_asset.asset_id)],
+        None,
         None,
         TransferStatus::Settled,
     );
@@ -536,6 +542,7 @@ fn success() {
             Some(&nia_asset_2.asset_id),
         ],
         None,
+        None,
         TransferStatus::Settled,
     );
     check_transfer_status(
@@ -545,6 +552,7 @@ fn success() {
             Some(&nia_asset_1.asset_id),
             Some(&nia_asset_2.asset_id),
         ],
+        None,
         None,
         TransferStatus::Settled,
     );
@@ -640,11 +648,13 @@ fn success() {
         &[&wlt_1, &wlt_2, &wlt_3],
         &[Some(&nia_asset_2.asset_id)],
         None,
+        None,
         TransferStatus::Settled,
     );
     check_transfer_status(
         &[&singlesig_wlt],
         &[Some(&nia_asset_2.asset_id)],
+        None,
         None,
         TransferStatus::Settled,
     );
@@ -795,6 +805,7 @@ fn success() {
     check_transfer_status(
         &[&wlt_1, &wlt_2, &wlt_3],
         &[None],
+        None,
         Some(receive_data.batch_transfer_idx),
         TransferStatus::Failed,
     );
@@ -822,6 +833,7 @@ fn success() {
         &[&wlt_1, &wlt_2, &wlt_3],
         &[Some(&nia_asset_2.asset_id)],
         None,
+        None,
         TransferStatus::WaitingCounterparty,
     );
     let transfers = wlt_1.list_transfers(Some(&nia_asset_2.asset_id));
@@ -841,6 +853,7 @@ fn success() {
     check_transfer_status(
         &[&wlt_1, &wlt_2, &wlt_3],
         &[Some(&nia_asset_2.asset_id)],
+        None,
         None,
         TransferStatus::Failed,
     );
@@ -1286,4 +1299,396 @@ fn fail() {
     assert_eq!(err, Error::MultisigUserNotCosigner);
     let err = wlt_wo.inflate_init_res("asset_id", &[]).unwrap_err();
     assert_eq!(err, Error::MultisigUserNotCosigner);
+}
+
+#[cfg(feature = "electrum")]
+#[test]
+#[serial]
+fn offline() {
+    initialize();
+
+    let bitcoin_network = BitcoinNetwork::Regtest;
+    let random_str: String = rand::rng()
+        .sample_iter(&Alphanumeric)
+        .take(6)
+        .map(char::from)
+        .collect();
+
+    // multisig wallet keys
+    let wlt_1_keys = generate_keys(bitcoin_network, WitnessVersion::Taproot);
+    let wlt_2_keys = generate_keys(bitcoin_network, WitnessVersion::Taproot);
+
+    // cosigners
+    let cosigners = vec![
+        Cosigner::from_keys(&wlt_1_keys, None),
+        Cosigner::from_keys(&wlt_2_keys, None),
+    ];
+    let multisig_wlt_keys = MultisigKeys::new(cosigners, 2, 2);
+
+    // create wallet without going online
+    let data_dir = get_test_data_dir_path()
+        .join(format!("{random_str}_offline"))
+        .to_string_lossy()
+        .to_string();
+    let _ = fs::create_dir_all(&data_dir);
+    let mut wallet =
+        MultisigWallet::new(get_test_wallet_data(&data_dir), multisig_wlt_keys).unwrap();
+
+    // === perform online operations with a fake Online object
+
+    let fake_online = Online { id: 0 };
+
+    // hub operations
+    let result = wallet.hub_info(fake_online);
+    assert_matches!(result, Err(Error::Offline));
+
+    let result = wallet.sync_with_hub(fake_online);
+    assert_matches!(result, Err(Error::Offline));
+
+    let result = wallet.respond_to_operation(fake_online, 0, RespondToOperation::Nack);
+    assert_matches!(result, Err(Error::Offline));
+
+    // wallet APIs
+    let result = wallet.blind_receive(fake_online, None, Assignment::Any, None, vec![], 0);
+    assert_matches!(result, Err(Error::Offline));
+
+    let result = wallet.burn_init(fake_online, "aid".into(), 0, 0, 0);
+    assert_matches!(result, Err(Error::Offline));
+
+    let result = wallet.create_utxos_init(fake_online, false, None, None, 0, false);
+    assert_matches!(result, Err(Error::Offline));
+
+    let result = wallet.fail_transfers(fake_online, None, false, false);
+    assert_matches!(result, Err(Error::Offline));
+
+    let result = wallet.get_address(fake_online);
+    assert_matches!(result, Err(Error::Offline));
+
+    let result = wallet.get_fee_estimation(fake_online, 1);
+    assert_matches!(result, Err(Error::Offline));
+
+    let result = wallet.inflate_init(fake_online, "aid".into(), vec![1], 0, 0);
+    assert_matches!(result, Err(Error::Offline));
+
+    let result = wallet.issue_asset_cfa(fake_online, "n".into(), None, 0, vec![1], None);
+    assert_matches!(result, Err(Error::Offline));
+
+    let result = wallet.issue_asset_ifa(
+        fake_online,
+        "T".into(),
+        "n".into(),
+        0,
+        vec![1],
+        vec![1],
+        None,
+    );
+    assert_matches!(result, Err(Error::Offline));
+
+    let result = wallet.issue_asset_nia(fake_online, "T".into(), "n".into(), 0, vec![1]);
+    assert_matches!(result, Err(Error::Offline));
+
+    let result = wallet.issue_asset_uda(fake_online, "T".into(), "n".into(), None, 0, None, vec![]);
+    assert_matches!(result, Err(Error::Offline));
+
+    let result = wallet.refresh(fake_online, None, vec![], false);
+    assert_matches!(result, Err(Error::Offline));
+
+    let result = wallet.send_btc_init(fake_online, "addr".into(), 0, 0, false);
+    assert_matches!(result, Err(Error::Offline));
+
+    let result = wallet.send_init(fake_online, HashMap::new(), false, 0, 0, None);
+    assert_matches!(result, Err(Error::Offline));
+
+    let result = wallet.sync(
+        fake_online,
+        SyncOptions {
+            keychain: SyncKeychain::Colored,
+            strategy: SyncStrategy::FastSync,
+        },
+    );
+    assert_matches!(result, Err(Error::Offline));
+
+    let result = wallet.witness_receive(fake_online, None, Assignment::Any, None, vec![], 0);
+    assert_matches!(result, Err(Error::Offline));
+}
+
+#[cfg(feature = "electrum")]
+#[test]
+#[serial]
+fn send_to_oneself() {
+    initialize();
+    op_counter_reset();
+
+    let bitcoin_network = BitcoinNetwork::Regtest;
+    let threshold_colored = 2;
+    let threshold_vanilla = 2;
+    let random_str: String = rand::rng()
+        .sample_iter(&Alphanumeric)
+        .take(6)
+        .map(char::from)
+        .collect();
+
+    // multisig wallet keys
+    let wlt_1_keys = generate_keys(bitcoin_network, WitnessVersion::Taproot);
+    let wlt_2_keys = generate_keys(bitcoin_network, WitnessVersion::Taproot);
+    let wlt_3_keys = generate_keys(bitcoin_network, WitnessVersion::Taproot);
+
+    // cosigners
+    let cosigners = vec![
+        Cosigner::from_keys(&wlt_1_keys, None),
+        Cosigner::from_keys(&wlt_2_keys, None),
+        Cosigner::from_keys(&wlt_3_keys, None),
+    ];
+    let cosigner_xpubs: Vec<String> = cosigners
+        .iter()
+        .map(|c| c.account_xpub_colored.clone())
+        .collect();
+
+    // biscuit token setup
+    let root_keypair = KeyPair::new();
+    let root_public_key = root_keypair.public();
+    let mut cosigner_tokens = vec![];
+    for cosigner_xpub in &cosigner_xpubs {
+        cosigner_tokens.push(create_token(
+            &root_keypair,
+            Role::Cosigner(cosigner_xpub.clone()),
+            None,
+        ));
+    }
+
+    // hub setup
+    write_hub_config(
+        &cosigner_xpubs,
+        threshold_colored,
+        threshold_vanilla,
+        root_public_key.to_bytes_hex(),
+        None,
+    );
+    restart_multisig_hub();
+
+    // multisig wallets
+    let multisig_wlt_keys =
+        MultisigKeys::new(cosigners.clone(), threshold_colored, threshold_vanilla);
+    let mut wlt_1_multisig = get_test_ms_wallet(&multisig_wlt_keys, format!("{random_str}_1"));
+    let wlt_1_multisig_online = ms_go_online(&mut wlt_1_multisig, &cosigner_tokens[0]);
+    let mut wlt_2_multisig = get_test_ms_wallet(&multisig_wlt_keys, format!("{random_str}_2"));
+    let wlt_2_multisig_online = ms_go_online(&mut wlt_2_multisig, &cosigner_tokens[1]);
+    let mut wlt_3_multisig = get_test_ms_wallet(&multisig_wlt_keys, format!("{random_str}_3"));
+    let wlt_3_multisig_online = ms_go_online(&mut wlt_3_multisig, &cosigner_tokens[2]);
+
+    // singlesig wallets (for signing)
+    let wlt_1_singlesig = get_test_wallet_with_keys(&wlt_1_keys);
+    let wlt_2_singlesig = get_test_wallet_with_keys(&wlt_2_keys);
+    let wlt_3_singlesig = get_test_wallet_with_keys(&wlt_3_keys);
+
+    // multisig parties
+    let mut wlt_1 = ms_party!(
+        &wlt_1_singlesig,
+        &mut wlt_1_multisig,
+        wlt_1_multisig_online,
+        &cosigner_xpubs[0]
+    );
+    let mut wlt_2 = ms_party!(
+        &wlt_2_singlesig,
+        &mut wlt_2_multisig,
+        wlt_2_multisig_online,
+        &cosigner_xpubs[1]
+    );
+    let mut wlt_3 = ms_party!(
+        &wlt_3_singlesig,
+        &mut wlt_3_multisig,
+        wlt_3_multisig_online,
+        &cosigner_xpubs[2]
+    );
+
+    // fund wallet 1
+    let sats = 30_000;
+    send_sats_to_address(wlt_1.get_address(), Some(sats));
+    mine(false);
+
+    check_hub_info(&mut [&mut wlt_1, &mut wlt_2, &mut wlt_3]);
+
+    // create UTXOs
+    println!("\n=== create UTXOs ===");
+    check_wallets_up_to_date(&mut [&mut wlt_1, &mut wlt_2, &mut wlt_3]);
+    let op_init = wlt_1.create_utxos_init(false, None, None, FEE_RATE);
+    operation_complete::<CreateUtxosHandler>(
+        op_init.operation_idx,
+        &mut [&mut wlt_1, &mut wlt_2],
+        &mut [],
+        &mut [&mut wlt_3],
+        true,
+    );
+    mine(false);
+
+    // issue NIA
+    println!("\n=== issue NIA ===");
+    let IssuedAsset::Nia(nia_asset) = issue_asset(
+        &mut wlt_1,
+        &mut [&mut wlt_2, &mut wlt_3],
+        AssetSchema::Nia,
+        Some(&[AMOUNT_SMALL]),
+        None,
+    ) else {
+        unreachable!()
+    };
+
+    // send BTC to oneself (wlt_1+2 send, wlt_3 receives via get_address)
+    let expected_btc_balance = BtcBalance {
+        vanilla: Balance {
+            settled: 24244,
+            future: 24244,
+            spendable: 24244,
+        },
+        colored: Balance {
+            settled: 5000,
+            future: 5000,
+            spendable: 5000,
+        },
+    };
+    wlt_1.wait_for_btc_balance(&expected_btc_balance);
+    wlt_2.wait_for_btc_balance(&expected_btc_balance);
+    wlt_3.wait_for_btc_balance(&expected_btc_balance);
+    println!("\n=== send BTC to oneself ===");
+    check_wallets_up_to_date(&mut [&mut wlt_1, &mut wlt_2, &mut wlt_3]);
+    let addr = wlt_3.get_address();
+    let op_init_btc = wlt_1.send_btc_init(&addr, 1000);
+    operation_complete::<SendBtcHandler>(
+        op_init_btc.operation_idx,
+        &mut [&mut wlt_1, &mut wlt_2],
+        &mut [],
+        &mut [&mut wlt_3],
+        true,
+    );
+    mine(false);
+    // check that only the vanilla balance changed and only by the fee amount
+    let expected_btc_balance = BtcBalance {
+        vanilla: Balance {
+            settled: 23832,
+            future: 23832,
+            spendable: 23832,
+        },
+        colored: Balance {
+            settled: 5000,
+            future: 5000,
+            spendable: 5000,
+        },
+    };
+    wlt_1.wait_for_btc_balance(&expected_btc_balance);
+    wlt_2.wait_for_btc_balance(&expected_btc_balance);
+    wlt_3.wait_for_btc_balance(&expected_btc_balance);
+
+    println!("\n=== send RGB to oneself ===");
+    let rcv_data_1 = wlt_3.blind_receive();
+    let rcv_data_2 = wlt_3.witness_receive();
+    // sync wlt_1 and wlt_2 so they process wlt_3's blind_receive operation
+    sync_wallets_full(&mut [&mut wlt_1, &mut wlt_2]);
+    // check all parties see the receive transfers in the WaitingCounterparty status
+    check_wallets_up_to_date(&mut [&mut wlt_1, &mut wlt_2, &mut wlt_3]);
+    check_transfer_status(
+        &[&wlt_1, &wlt_2, &wlt_3],
+        &[None],
+        Some(2), // blind receive
+        None,
+        TransferStatus::WaitingCounterparty,
+    );
+    check_transfer_status(
+        &[&wlt_1, &wlt_2, &wlt_3],
+        &[None],
+        Some(3), // witness receive
+        None,
+        TransferStatus::WaitingCounterparty,
+    );
+    // send the assets
+    let recipient_map = HashMap::from([(
+        nia_asset.asset_id.clone(),
+        vec![
+            Recipient {
+                assignment: Assignment::Fungible(20),
+                recipient_id: rcv_data_1.recipient_id.clone(),
+                witness_data: None,
+                transport_endpoints: TRANSPORT_ENDPOINTS.clone(),
+            },
+            Recipient {
+                assignment: Assignment::Fungible(30),
+                recipient_id: rcv_data_2.recipient_id.clone(),
+                witness_data: Some(WitnessData {
+                    amount_sat: 1000,
+                    blinding: None,
+                }),
+                transport_endpoints: TRANSPORT_ENDPOINTS.clone(),
+            },
+        ],
+    )]);
+    let op_init_rgb = wlt_1.send_init(recipient_map);
+    operation_complete::<SendRgbHandler>(
+        op_init_rgb.operation_idx,
+        &mut [&mut wlt_1, &mut wlt_2],
+        &mut [],
+        &mut [&mut wlt_3],
+        true,
+    );
+    // operation_complete calls refresh for all parties (via sync_with_hub),
+    // so the receive transfers are now in WaitingConfirmations status
+    //
+    // send_init calls send_begin with dry_run=true so there are no send transfers yet
+    check_transfer_status(
+        &[&wlt_1, &wlt_2, &wlt_3],
+        &[Some(&nia_asset.asset_id)],
+        Some(2), // blind receive
+        None,
+        TransferStatus::WaitingConfirmations,
+    );
+    check_transfer_status(
+        &[&wlt_1, &wlt_2, &wlt_3],
+        &[Some(&nia_asset.asset_id)],
+        Some(3), // witness receive
+        None,
+        TransferStatus::WaitingConfirmations,
+    );
+    settle_transfer(
+        &mut [&mut wlt_1, &mut wlt_2],
+        &mut [&mut wlt_3],
+        Some(&nia_asset.asset_id),
+        None,
+        Some(&op_init_rgb.psbt),
+        false, // operation_complete already refreshed once
+    );
+    check_wallets_up_to_date(&mut [&mut wlt_1, &mut wlt_2, &mut wlt_3]);
+
+    // final transfer state: all 3 parties see 4 Settled transfers
+    check_transfer_status(
+        &[&wlt_1, &wlt_2, &wlt_3],
+        &[Some(&nia_asset.asset_id)],
+        Some(2), // blind receive
+        None,
+        TransferStatus::Settled,
+    );
+    check_transfer_status(
+        &[&wlt_1, &wlt_2, &wlt_3],
+        &[Some(&nia_asset.asset_id)],
+        Some(3), // witness receive
+        None,
+        TransferStatus::Settled,
+    );
+    check_transfer_status(
+        &[&wlt_1, &wlt_2, &wlt_3],
+        &[Some(&nia_asset.asset_id)],
+        Some(4), // send to blinded
+        None,
+        TransferStatus::Settled,
+    );
+    check_transfer_status(
+        &[&wlt_1, &wlt_2, &wlt_3],
+        &[Some(&nia_asset.asset_id)],
+        Some(5), // send to witness
+        None,
+        TransferStatus::Settled,
+    );
+    // final balance check: all parties see the issuance balance
+    check_asset_balance(
+        &[&wlt_1, &wlt_2, &wlt_3],
+        &nia_asset.asset_id,
+        (AMOUNT_SMALL, AMOUNT_SMALL, AMOUNT_SMALL),
+    );
 }

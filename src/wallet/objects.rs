@@ -826,7 +826,10 @@ pub struct AssignmentsCollection {
 #[cfg(any(feature = "electrum", feature = "esplora"))]
 impl AssignmentsCollection {
     fn add_fungible(&mut self, amt: u64) {
-        self.fungible += amt;
+        self.fungible = self
+            .fungible
+            .checked_add(amt)
+            .expect("total fungible amount cannot exceed u64::MAX");
     }
 
     fn add_non_fungible(&mut self) {
@@ -834,7 +837,10 @@ impl AssignmentsCollection {
     }
 
     fn add_inflation(&mut self, amt: u64) {
-        self.inflation += amt;
+        self.inflation = self
+            .inflation
+            .checked_add(amt)
+            .expect("total inflation amount cannot exceed u64::MAX");
     }
 
     pub(crate) fn add_opout_state(&mut self, opout: &Opout, state: &AllocatedState) {
@@ -872,9 +878,15 @@ impl AssignmentsCollection {
 
     pub(crate) fn change(&self, needed: &Self) -> Self {
         Self {
-            fungible: self.fungible - needed.fungible,
+            fungible: self
+                .fungible
+                .checked_sub(needed.fungible)
+                .expect("selected inputs must cover outputs"),
             non_fungible: false,
-            inflation: self.inflation - needed.inflation,
+            inflation: self
+                .inflation
+                .checked_sub(needed.inflation)
+                .expect("selected inputs must cover outputs"),
         }
     }
 
@@ -1723,9 +1735,11 @@ pub struct OperationResult {
 #[cfg(any(feature = "electrum", feature = "esplora"))]
 pub enum RefreshTransferStatus {
     /// Waiting for the counterparty to take action
-    WaitingCounterparty = 1,
+    WaitingCounterparty,
+    /// Waiting for the safe height to be reached
+    WaitingSafeHeight,
     /// Waiting for the transfer transaction to reach the minimum number of confirmations
-    WaitingConfirmations = 2,
+    WaitingConfirmations,
 }
 
 #[cfg(any(feature = "electrum", feature = "esplora"))]
@@ -1735,8 +1749,9 @@ impl TryFrom<TransferStatus> for RefreshTransferStatus {
     fn try_from(x: TransferStatus) -> Result<Self, Self::Error> {
         match x {
             TransferStatus::WaitingCounterparty => Ok(RefreshTransferStatus::WaitingCounterparty),
+            TransferStatus::WaitingSafeHeight => Ok(RefreshTransferStatus::WaitingSafeHeight),
             TransferStatus::WaitingConfirmations => Ok(RefreshTransferStatus::WaitingConfirmations),
-            _ => Err("ResfreshStatus only accepts pending statuses"),
+            _ => Err("RefreshTransferStatus only accepts pending statuses"),
         }
     }
 }

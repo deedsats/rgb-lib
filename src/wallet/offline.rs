@@ -124,7 +124,12 @@ pub trait WalletOffline: WalletBackup {
         mut_unspents
             .iter_mut()
             .for_each(|u| u.rgb_allocations.retain(|a| !a.status.failed()));
-        let max_allocs = max_allocations.unwrap_or(self.max_allocations_per_utxo() - 1);
+        let max_allocs = max_allocations.unwrap_or_else(|| {
+            // guaranteed > 0; guard here too to avoid future regression
+            self.max_allocations_per_utxo()
+                .checked_sub(1)
+                .expect("max allocations per UTXO must be greater than 0")
+        });
         Ok(mut_unspents
             .iter()
             .filter(|u| u.utxo.exists)
@@ -1238,7 +1243,7 @@ pub trait WalletOffline: WalletBackup {
     ) -> Result<BdkAddress, Error> {
         let (bdk_wallet, bdk_db) = self.bdk_wallet_db_mut();
         let address = bdk_wallet.reveal_next_address(keychain).address;
-        bdk_wallet.persist(bdk_db)?;
+        block_on(bdk_wallet.persist_async(bdk_db))?;
         Ok(address)
     }
 
@@ -1453,7 +1458,10 @@ pub trait WalletOffline: WalletBackup {
         Ok(Balance {
             settled: balance.confirmed.to_sat(),
             future: future.to_sat(),
-            spendable: future.to_sat() - balance.immature.to_sat(),
+            spendable: future
+                .to_sat()
+                .checked_sub(balance.immature.to_sat())
+                .expect("immature balance cannot exceed the total balance"),
         })
     }
 
