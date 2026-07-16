@@ -37,7 +37,6 @@ fn success() {
     let bundle = consignment.bundled_witnesses().last().unwrap();
     let tx = bundle.pub_witness.tx().unwrap();
     for sig in &signatures {
-        assert_eq!(sig.outpoint.txid, txid);
         let mut preimage = Vec::new();
         preimage.extend_from_slice(sig.outpoint.txid.as_bytes());
         preimage.extend_from_slice(b":");
@@ -55,14 +54,34 @@ fn success() {
             bdk_wallet::bitcoin::secp256k1::Message::from_digest(expected_hash.to_byte_array());
         secp.verify_schnorr(&schnorr_sig, &msg, &xonly).unwrap();
 
-        // verify pubkey matches witness TX P2TR output
-        let output = tx.output.get(sig.outpoint.vout as usize).unwrap();
-        let spk = output.script_pubkey.as_bytes();
-        assert_eq!(spk.len(), 34);
-        assert_eq!(spk[0], 0x51);
-        assert_eq!(spk[1], 0x20);
-        assert_eq!(&spk[2..34], sig.pubkey.as_slice());
+        if sig.outpoint.txid == txid {
+            // verify pubkey matches witness TX P2TR output
+            let output = tx.output.get(sig.outpoint.vout as usize).unwrap();
+            let spk = output.script_pubkey.as_bytes();
+            assert_eq!(spk.len(), 34);
+            assert_eq!(spk[0], 0x51);
+            assert_eq!(spk[1], 0x20);
+            assert_eq!(&spk[2..34], sig.pubkey.as_slice());
+        }
     }
+
+    // the asset change is sealed to a pre-existing UTXO, not to a witness TX
+    // output; its outpoint must be signed as well
+    let transfers = party
+        .wallet
+        .list_transfers(Some(asset.asset_id.clone()))
+        .unwrap();
+    let change_utxo = transfers
+        .iter()
+        .find(|t| t.txid.as_deref() == Some(&txid))
+        .unwrap()
+        .change_utxo
+        .clone()
+        .unwrap();
+    assert!(
+        signatures.iter().any(|sig| sig.outpoint == change_utxo),
+        "missing signature for change outpoint {change_utxo:?}"
+    );
 
     // settle the first transfer so change becomes spendable
     rcv_party.wait_for_refresh(None);
@@ -94,10 +113,31 @@ fn success() {
         .wallet
         .prove_asset_ownership(&consignment, b"self send")
         .unwrap();
-    assert_eq!(signatures.len(), 2);
-    let vouts: Vec<u32> = signatures.iter().map(|s| s.outpoint.vout).collect();
-    let unique_vouts: HashSet<u32> = vouts.iter().copied().collect();
-    assert_eq!(vouts.len(), unique_vouts.len());
+    let witness_signatures = signatures
+        .iter()
+        .filter(|s| s.outpoint.txid == txid)
+        .count();
+    assert_eq!(witness_signatures, 2);
+    let outpoints: HashSet<(String, u32)> = signatures
+        .iter()
+        .map(|s| (s.outpoint.txid.clone(), s.outpoint.vout))
+        .collect();
+    assert_eq!(outpoints.len(), signatures.len());
+    let transfers = party
+        .wallet
+        .list_transfers(Some(asset.asset_id.clone()))
+        .unwrap();
+    let change_utxo = transfers
+        .iter()
+        .find(|t| t.txid.as_deref() == Some(&txid))
+        .unwrap()
+        .change_utxo
+        .clone()
+        .unwrap();
+    assert!(
+        signatures.iter().any(|sig| sig.outpoint == change_utxo),
+        "missing signature for change outpoint {change_utxo:?}"
+    );
 }
 
 #[cfg(feature = "electrum")]

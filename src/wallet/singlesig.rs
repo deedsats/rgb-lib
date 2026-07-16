@@ -567,17 +567,21 @@ impl Wallet {
         })
     }
 
-    /// Prove ownership of an RGB asset by signing P2TR outputs in the consignment's witness TX.
+    /// Prove ownership of an RGB asset by signing the P2TR outpoints assigned by the
+    /// consignment's last transition bundle.
     ///
     /// The signed message is `SHA256(txid || ":" || vout || ":" || message)`, binding the
     /// signature to the specific UTXO. The caller can include a contract ID, nonce, or any
     /// other context in `message`.
     ///
-    /// The method finds all wallet-controlled P2TR outputs in the consignment's witness TX
-    /// and signs each one. Each returned [`UtxoSignature`] contains the 32-byte x-only tweaked
-    /// public key matching the P2TR output's scriptPubKey at bytes `[2..34]`.
+    /// The method signs all wallet-controlled P2TR outputs of the consignment's witness TX,
+    /// plus any wallet-controlled P2TR outpoint referenced by an assignment seal with an
+    /// explicit TXID (e.g. asset change allocated to a pre-existing UTXO). Concealed seals
+    /// are resolved through the wallet's own stash. Each returned [`UtxoSignature`] contains
+    /// the 32-byte x-only tweaked public key matching the P2TR output's scriptPubKey at
+    /// bytes `[2..34]`.
     ///
-    /// Returns an empty `Vec` if no owned P2TR outputs are found.
+    /// Returns an empty `Vec` if no owned P2TR outpoints are found.
     ///
     /// A wallet with private keys (i.e. not watch-only) is required.
     pub fn prove_asset_ownership(
@@ -606,7 +610,6 @@ impl Wallet {
         let tx = bundle.pub_witness.tx().ok_or(Error::NoConsignment)?;
         let witness_txid = bundle.witness_id().to_string();
         let secp = Secp256k1::new();
-        let mut signatures = Vec::new();
 
         // pre-compute account xprvs for both keychains
         let (rgb_account_xprv, _) = derive_account_xprv_from_mnemonic(
@@ -621,19 +624,13 @@ impl Wallet {
             false,
             WitnessVersion::Taproot,
         )?;
-        for (vout, output) in tx.output.iter().enumerate() {
-            if !output.script_pubkey.is_p2tr() {
-                continue;
-            }
-            let spk = output.script_pubkey.as_bytes();
 
-            let (keychain, derivation_index) = match self
-                .bdk_wallet()
-                .derivation_of_spk(output.script_pubkey.clone())
-            {
-                Some(info) => info,
-                None => continue,
-            };
+        let sign_owned_output = |outpoint: Outpoint,
+                                 script_pubkey: &ScriptBuf,
+                                 keychain: KeychainKind,
+                                 derivation_index: u32|
+         -> Result<Option<UtxoSignature>, Error> {
+            let spk = script_pubkey.as_bytes();
             let rgb = keychain == KeychainKind::External;
             let account_xprv = if rgb {
                 &rgb_account_xprv
@@ -658,12 +655,8 @@ impl Wallet {
 
             // verify our tweaked key matches the scriptPubKey
             if tweaked_xonly.serialize() != spk[2..34] {
-                continue;
+                return Ok(None);
             }
-            let outpoint = Outpoint {
-                txid: witness_txid.clone(),
-                vout: vout as u32,
-            };
             let mut preimage = Vec::new();
             preimage.extend_from_slice(outpoint.txid.as_bytes());
             preimage.extend_from_slice(b":");
@@ -675,13 +668,101 @@ impl Wallet {
             let msg =
                 bdk_wallet::bitcoin::secp256k1::Message::from_digest(msg_hash.to_byte_array());
             let sig = secp.sign_schnorr_no_aux_rand(&msg, &tweaked_keypair);
-            signatures.push(UtxoSignature {
+            Ok(Some(UtxoSignature {
                 outpoint,
                 message: msg_hash.to_byte_array().to_vec(),
                 signature: sig.as_ref().to_vec(),
                 pubkey: tweaked_xonly.serialize().to_vec(),
-            });
+            }))
+        };
+
+        let mut signatures = Vec::new();
+        for (vout, output) in tx.output.iter().enumerate() {
+            if !output.script_pubkey.is_p2tr() {
+                continue;
+            }
+            let (keychain, derivation_index) = match self
+                .bdk_wallet()
+                .derivation_of_spk(output.script_pubkey.clone())
+            {
+                Some(info) => info,
+                None => continue,
+            };
+            let outpoint = Outpoint {
+                txid: witness_txid.clone(),
+                vout: vout as u32,
+            };
+            if let Some(signature) =
+                sign_owned_output(outpoint, &output.script_pubkey, keychain, derivation_index)?
+            {
+                signatures.push(signature);
+            }
         }
+
+        // Assignments may seal to a pre-existing wallet UTXO instead of an output of the
+        // witness TX (e.g. asset change). Those outpoints are referenced by seals carrying
+        // an explicit TXID, so they are not covered by the witness TX loop above.
+        let mut runtime = self.rgb_runtime()?;
+        let mut seen: HashSet<(String, u32)> = signatures
+            .iter()
+            .map(|s| (s.outpoint.txid.clone(), s.outpoint.vout))
+            .collect();
+        for KnownTransition { transition, .. } in bundle.bundle.known_transitions.iter() {
+            for (_, typed_assigns) in transition.assignments.iter() {
+                let mut seals = Vec::new();
+                for fungible_assignment in typed_assigns.as_fungible().iter() {
+                    match fungible_assignment {
+                        Assign::Revealed { seal, .. } => seals.push(*seal),
+                        Assign::ConfidentialSeal { seal, .. } => {
+                            if let Some(known_seal) = runtime.seal_secret(*seal).unwrap_or(None) {
+                                seals.push(known_seal);
+                            }
+                        }
+                    }
+                }
+                for structured_assignment in typed_assigns.as_structured().iter() {
+                    match structured_assignment {
+                        Assign::Revealed { seal, .. } => seals.push(*seal),
+                        Assign::ConfidentialSeal { seal, .. } => {
+                            if let Some(known_seal) = runtime.seal_secret(*seal).unwrap_or(None) {
+                                seals.push(known_seal);
+                            }
+                        }
+                    }
+                }
+                for seal in seals {
+                    let TxPtr::Txid(seal_txid) = seal.txid else {
+                        // seals on the witness TX are covered by the loop above
+                        continue;
+                    };
+                    let txid = seal_txid.to_string();
+                    let vout = seal.vout.into_u32();
+                    if !seen.insert((txid.clone(), vout)) {
+                        continue;
+                    }
+                    let Ok(bdk_txid) = bdk_wallet::bitcoin::Txid::from_str(&txid) else {
+                        continue;
+                    };
+                    let Some(utxo) = self.bdk_wallet().get_utxo(BdkOutPoint::new(bdk_txid, vout))
+                    else {
+                        continue;
+                    };
+                    if !utxo.txout.script_pubkey.is_p2tr() {
+                        continue;
+                    }
+                    let outpoint = Outpoint { txid, vout };
+                    if let Some(signature) = sign_owned_output(
+                        outpoint,
+                        &utxo.txout.script_pubkey,
+                        utxo.keychain,
+                        utxo.derivation_index,
+                    )? {
+                        signatures.push(signature);
+                    }
+                }
+            }
+        }
+
         info!(self.logger(), "Prove asset ownership completed");
         Ok(signatures)
     }
