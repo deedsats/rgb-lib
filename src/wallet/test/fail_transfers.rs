@@ -71,7 +71,7 @@ fn success() {
     ));
     assert!(rcv_party.check_test_transfer_status_recipient(
         &receive_data_3.recipient_id,
-        TransferStatus::WaitingConfirmations
+        TransferStatus::WaitingBroadcast
     ));
     assert!(rcv_party.fail_transfers_all());
     rcv_party.show_unspent_colorings("receiver run 1 after fail");
@@ -86,7 +86,7 @@ fn success() {
     ));
     assert!(rcv_party.check_test_transfer_status_recipient(
         &receive_data_3.recipient_id,
-        TransferStatus::WaitingConfirmations
+        TransferStatus::WaitingBroadcast
     ));
 
     // progress transfer to Settled
@@ -137,7 +137,7 @@ fn success() {
     ));
     assert!(rcv_party.check_test_transfer_status_recipient(
         &receive_data_3.recipient_id,
-        TransferStatus::WaitingConfirmations
+        TransferStatus::WaitingBroadcast
     ));
     assert!(rcv_party.check_test_transfer_status_recipient(
         &receive_data_4.recipient_id,
@@ -156,7 +156,7 @@ fn success() {
     ));
     assert!(rcv_party.check_test_transfer_status_recipient(
         &receive_data_3.recipient_id,
-        TransferStatus::WaitingConfirmations
+        TransferStatus::WaitingBroadcast
     ));
     assert!(rcv_party.check_test_transfer_status_recipient(
         &receive_data_4.recipient_id,
@@ -242,7 +242,7 @@ fn batch_success() {
     rcv_party_1.wait_for_refresh(None);
     assert!(rcv_party_1.check_test_transfer_status_recipient(
         &receive_data_1.recipient_id,
-        TransferStatus::WaitingConfirmations
+        TransferStatus::WaitingBroadcast
     ));
     assert!(rcv_party_2.check_test_transfer_status_recipient(
         &receive_data_2.recipient_id,
@@ -260,6 +260,19 @@ fn batch_success() {
 fn fail() {
     initialize();
 
+    // === offline tests
+
+    let mut offline_party = {
+        let wallet = get_test_wallet(true, None);
+        party!(wallet, Online { id: 0 })
+    };
+    let result = offline_party
+        .wallet
+        .fail_transfers(Online { id: 0 }, None, false, false);
+    assert_matches!(result, Err(Error::Offline));
+
+    // === online tests
+
     // wallets
     let mut party = get_funded_party!();
     let mut rcv_party = get_funded_party!();
@@ -274,7 +287,7 @@ fn fail() {
         .blind_receive(
             Some(asset.asset_id),
             Assignment::Any,
-            None,
+            default_rcv_expiration(),
             TRANSPORT_ENDPOINTS.clone(),
             MIN_CONFIRMATIONS,
         )
@@ -327,14 +340,12 @@ fn fail() {
         Err(Error::BatchTransferNotFound { idx }) if idx == UNKNOWN_IDX
     ));
 
-    // don't fail incoming transfer: waiting counterparty -> confirmations
+    // don't fail incoming transfer: waiting counterparty -> broadcast
     let result = rcv_party.fail_transfers(Some(batch_transfer_idx), false, false);
     assert!(matches!(result, Err(Error::CannotFailBatchTransfer)));
     assert!(
-        rcv_party.check_test_transfer_status_recipient(
-            &recipient_id,
-            TransferStatus::WaitingConfirmations
-        )
+        rcv_party
+            .check_test_transfer_status_recipient(&recipient_id, TransferStatus::WaitingBroadcast)
     );
     // don't fail outgoing transfer: waiting counterparty -> confirmations
     let result = party.fail_transfers(Some(send_result.batch_transfer_idx), false, false);
@@ -346,14 +357,12 @@ fn fail() {
         )
     );
 
-    // don't fail incoming transfer: waiting confirmations
+    // don't fail incoming transfer: waiting broadcast (fallible only after expiration)
     let result = rcv_party.fail_transfers(Some(batch_transfer_idx), false, false);
     assert!(matches!(result, Err(Error::CannotFailBatchTransfer)));
     assert!(
-        rcv_party.check_test_transfer_status_recipient(
-            &recipient_id,
-            TransferStatus::WaitingConfirmations
-        )
+        rcv_party
+            .check_test_transfer_status_recipient(&recipient_id, TransferStatus::WaitingBroadcast)
     );
     // don't fail outgoing transfer: waiting confirmations
     let result = party.fail_transfers(Some(send_result.batch_transfer_idx), false, false);
@@ -425,7 +434,7 @@ fn batch_fail() {
             true,
             FEE_RATE,
             MIN_CONFIRMATIONS,
-            None,
+            default_send_expiration(),
         )
         .unwrap();
 
@@ -501,7 +510,7 @@ fn skip_sync() {
     ));
     assert!(rcv_party.check_test_transfer_status_recipient(
         &receive_data_3.recipient_id,
-        TransferStatus::WaitingConfirmations
+        TransferStatus::WaitingBroadcast
     ));
     assert!(rcv_party.fail_transfers(None, false, true).unwrap());
     rcv_party.show_unspent_colorings("receiver run 1 after fail");
@@ -516,7 +525,7 @@ fn skip_sync() {
     ));
     assert!(rcv_party.check_test_transfer_status_recipient(
         &receive_data_3.recipient_id,
-        TransferStatus::WaitingConfirmations
+        TransferStatus::WaitingBroadcast
     ));
 
     // progress transfer to Settled
@@ -567,7 +576,7 @@ fn skip_sync() {
     ));
     assert!(rcv_party.check_test_transfer_status_recipient(
         &receive_data_3.recipient_id,
-        TransferStatus::WaitingConfirmations
+        TransferStatus::WaitingBroadcast
     ));
     assert!(rcv_party.check_test_transfer_status_recipient(
         &receive_data_4.recipient_id,
@@ -586,7 +595,7 @@ fn skip_sync() {
     ));
     assert!(rcv_party.check_test_transfer_status_recipient(
         &receive_data_3.recipient_id,
-        TransferStatus::WaitingConfirmations
+        TransferStatus::WaitingBroadcast
     ));
     assert!(rcv_party.check_test_transfer_status_recipient(
         &receive_data_4.recipient_id,
@@ -641,7 +650,7 @@ fn waiting_safe_height() {
         .blind_receive(
             None,
             Assignment::Any,
-            Some((now().unix_timestamp() + DURATION_RCV_TRANSFER as i64) as u64),
+            (now().unix_timestamp() + DURATION_RCV_TRANSFER as i64) as u64,
             TRANSPORT_ENDPOINTS.clone(),
             2,
         )

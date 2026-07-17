@@ -258,17 +258,15 @@ fn success() {
         }
     );
 
-    // transfers progress to status WaitingConfirmations after a refresh
+    // after a refresh the receiver waits for the broadcast while the sender progresses to
+    // WaitingConfirmations
     rcv_party.wait_for_refresh(None);
     let rcv_transfer = rcv_party.get_test_transfer_recipient(&receive_data.recipient_id);
     let (rcv_transfer_data, _rcv_asset_transfer) = rcv_party.get_test_transfer_data(&rcv_transfer);
     party.wait_for_refresh(Some(&asset.asset_id));
     let (transfer, _, _) = party.get_test_transfer_sender(&txid);
     let (transfer_data, _) = party.get_test_transfer_data(&transfer);
-    assert_eq!(
-        rcv_transfer_data.status,
-        TransferStatus::WaitingConfirmations
-    );
+    assert_eq!(rcv_transfer_data.status, TransferStatus::WaitingBroadcast);
     assert_eq!(transfer_data.status, TransferStatus::WaitingConfirmations);
 
     // asset has been received correctly
@@ -428,6 +426,31 @@ fn success() {
 #[parallel]
 fn fail() {
     initialize();
+
+    // === offline tests
+
+    let mut offline_party = {
+        let wallet = get_test_wallet(true, None);
+        party!(wallet, Online { id: 0 })
+    };
+    let result =
+        offline_party
+            .wallet
+            .burn(Online { id: 0 }, s!(""), 0, FEE_RATE, MIN_CONFIRMATIONS);
+    assert_matches!(result, Err(Error::Offline));
+    let result = offline_party.wallet.burn_begin(
+        Online { id: 0 },
+        s!(""),
+        0,
+        FEE_RATE,
+        MIN_CONFIRMATIONS,
+        false,
+    );
+    assert_matches!(result, Err(Error::Offline));
+    let result = offline_party.wallet.burn_end(Online { id: 0 }, s!(""));
+    assert_matches!(result, Err(Error::Offline));
+
+    // === online tests
 
     let mut party = get_funded_party!();
 
