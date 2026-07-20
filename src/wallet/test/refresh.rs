@@ -25,6 +25,10 @@ fn success() {
         status: RefreshTransferStatus::WaitingConfirmations,
         incoming: false,
     };
+    let filter_broadcast_in = RefreshFilter {
+        status: RefreshTransferStatus::WaitingBroadcast,
+        incoming: true,
+    };
 
     let mut party_1 = get_funded_party!();
     let mut party_2 = get_funded_party!();
@@ -122,7 +126,7 @@ fn success() {
     );
     assert!(party_1.check_test_transfer_status_recipient(
         &receive_data_1a.recipient_id,
-        TransferStatus::WaitingConfirmations
+        TransferStatus::WaitingBroadcast
     ));
     assert!(party_1.check_test_transfer_status_recipient(
         &receive_data_1b.recipient_id,
@@ -136,7 +140,7 @@ fn success() {
     );
     assert!(party_2.check_test_transfer_status_recipient(
         &receive_data_2a.recipient_id,
-        TransferStatus::WaitingConfirmations
+        TransferStatus::WaitingBroadcast
     ));
     assert!(party_2.check_test_transfer_status_recipient(
         &receive_data_2b.recipient_id,
@@ -159,11 +163,11 @@ fn success() {
     );
     assert!(party_1.check_test_transfer_status_recipient(
         &receive_data_1a.recipient_id,
-        TransferStatus::WaitingConfirmations
+        TransferStatus::WaitingBroadcast
     ));
     assert!(party_1.check_test_transfer_status_recipient(
         &receive_data_1b.recipient_id,
-        TransferStatus::WaitingConfirmations
+        TransferStatus::WaitingBroadcast
     ));
 
     // refresh outgoing WaitingCounterparty only (wallet 2)
@@ -185,11 +189,25 @@ fn success() {
     );
     assert!(party_2.check_test_transfer_status_recipient(
         &receive_data_2a.recipient_id,
-        TransferStatus::WaitingConfirmations
+        TransferStatus::WaitingBroadcast
     ));
     assert!(party_2.check_test_transfer_status_recipient(
         &receive_data_2b.recipient_id,
         TransferStatus::WaitingCounterparty
+    ));
+
+    // refresh incoming WaitingBroadcast only (wallet 2): the TX is in the mempool so the transfer
+    // moves to WaitingConfirmations
+    assert!(
+        party_2
+            .refresh_result(None, &[filter_broadcast_in])
+            .unwrap()
+            .transfers_changed()
+    );
+    party_2.show_unspent_colorings("wallet 2 after refresh incoming WaitingBroadcast");
+    assert!(party_2.check_test_transfer_status_recipient(
+        &receive_data_2a.recipient_id,
+        TransferStatus::WaitingConfirmations
     ));
 
     drop(_guard);
@@ -197,7 +215,8 @@ fn success() {
     mine_tx(false, &txid_2a);
     mine_tx(false, &txid_2b);
 
-    // refresh incoming WaitingConfirmations only (wallet 2)
+    // refresh incoming WaitingConfirmations only (wallet 2): the TX is now mined so the transfer
+    // settles
     assert!(
         party_2
             .refresh_result(None, &[filter_confirm_in])
@@ -234,11 +253,11 @@ fn success() {
     );
     assert!(party_1.check_test_transfer_status_recipient(
         &receive_data_1a.recipient_id,
-        TransferStatus::WaitingConfirmations
+        TransferStatus::WaitingBroadcast
     ));
     assert!(party_1.check_test_transfer_status_recipient(
         &receive_data_1b.recipient_id,
-        TransferStatus::WaitingConfirmations
+        TransferStatus::WaitingBroadcast
     ));
 }
 
@@ -247,6 +266,19 @@ fn success() {
 #[parallel]
 fn fail() {
     initialize();
+
+    // === offline tests
+
+    let mut offline_party = {
+        let wallet = get_test_wallet(true, None);
+        party!(wallet, Online { id: 0 })
+    };
+    let result = offline_party
+        .wallet
+        .refresh(Online { id: 0 }, None, vec![], false);
+    assert_matches!(result, Err(Error::Offline));
+
+    // === online tests
 
     let mut party = get_funded_party!();
 
@@ -469,8 +501,7 @@ fn uda_with_media() {
     assert!(!txid.is_empty());
 
     party_2.wait_for_refresh(None);
-    let assets_list = party_2.list_assets(&[]);
-    assert!(assets_list.uda.unwrap()[0].media.is_some());
+    party_2.check_uda_medias(&file_bytes);
     party_1.wait_for_refresh(None);
     mine(false);
     party_2.wait_for_refresh(None);
@@ -490,8 +521,7 @@ fn uda_with_media() {
     assert!(!txid.is_empty());
 
     party_3.wait_for_refresh(None);
-    let assets_list = party_3.list_assets(&[]);
-    assert!(assets_list.uda.unwrap()[0].media.is_some());
+    party_3.check_uda_medias(&file_bytes);
     party_2.wait_for_refresh(None);
     mine(false);
     party_3.wait_for_refresh(None);
@@ -645,6 +675,10 @@ fn skip_sync() {
         status: RefreshTransferStatus::WaitingConfirmations,
         incoming: false,
     };
+    let filter_broadcast_in = RefreshFilter {
+        status: RefreshTransferStatus::WaitingBroadcast,
+        incoming: true,
+    };
 
     let mut party_1 = get_funded_party!();
     let mut party_2 = get_funded_party!();
@@ -773,7 +807,7 @@ fn skip_sync() {
     );
     assert!(party_1.check_test_transfer_status_recipient(
         &receive_data_1a.recipient_id,
-        TransferStatus::WaitingConfirmations
+        TransferStatus::WaitingBroadcast
     ));
     assert!(party_1.check_test_transfer_status_recipient(
         &receive_data_1b.recipient_id,
@@ -787,7 +821,7 @@ fn skip_sync() {
     );
     assert!(party_2.check_test_transfer_status_recipient(
         &receive_data_2a.recipient_id,
-        TransferStatus::WaitingConfirmations
+        TransferStatus::WaitingBroadcast
     ));
     assert!(party_2.check_test_transfer_status_recipient(
         &receive_data_2b.recipient_id,
@@ -811,11 +845,11 @@ fn skip_sync() {
     );
     assert!(party_1.check_test_transfer_status_recipient(
         &receive_data_1a.recipient_id,
-        TransferStatus::WaitingConfirmations
+        TransferStatus::WaitingBroadcast
     ));
     assert!(party_1.check_test_transfer_status_recipient(
         &receive_data_1b.recipient_id,
-        TransferStatus::WaitingConfirmations
+        TransferStatus::WaitingBroadcast
     ));
 
     // refresh outgoing WaitingCounterparty only (wallet 2), skipping sync
@@ -835,17 +869,33 @@ fn skip_sync() {
     );
     assert!(party_2.check_test_transfer_status_recipient(
         &receive_data_2a.recipient_id,
-        TransferStatus::WaitingConfirmations
+        TransferStatus::WaitingBroadcast
     ));
     assert!(party_2.check_test_transfer_status_recipient(
         &receive_data_2b.recipient_id,
         TransferStatus::WaitingCounterparty
     ));
 
+    // refresh incoming WaitingBroadcast only (wallet 2), skipping sync: the TX is in the mempool
+    // so the transfer moves to WaitingConfirmations
+    assert!(
+        party_2
+            .wallet
+            .refresh(party_2.online, None, vec![filter_broadcast_in], true)
+            .unwrap()
+            .transfers_changed()
+    );
+    party_2.show_unspent_colorings("wallet 2 after refresh incoming WaitingBroadcast");
+    assert!(party_2.check_test_transfer_status_recipient(
+        &receive_data_2a.recipient_id,
+        TransferStatus::WaitingConfirmations
+    ));
+
     drop(_guard);
     mine(false);
 
-    // refresh incoming WaitingConfirmations only (wallet 2), skipping sync
+    // refresh incoming WaitingConfirmations only (wallet 2), skipping sync: the TX is now mined so
+    // the transfer settles
     assert!(
         party_2
             .wallet
@@ -884,10 +934,108 @@ fn skip_sync() {
     );
     assert!(party_1.check_test_transfer_status_recipient(
         &receive_data_1a.recipient_id,
-        TransferStatus::WaitingConfirmations
+        TransferStatus::WaitingBroadcast
     ));
     assert!(party_1.check_test_transfer_status_recipient(
         &receive_data_1b.recipient_id,
-        TransferStatus::WaitingConfirmations
+        TransferStatus::WaitingBroadcast
+    ));
+}
+
+#[cfg(feature = "electrum")]
+#[test]
+#[parallel]
+fn filter_with_waiting_safe_height() {
+    initialize();
+
+    let amount: u64 = 66;
+
+    // wallets
+    let mut party_1 = get_funded_party!();
+    let mut party_2 = get_funded_party!();
+
+    // issue
+    let asset = party_1.issue_asset_nia(None);
+
+    // 1st transfer: wallet 1 > wallet 2 (settle it to give txid_1 a single confirmation)
+    let receive_data_1 = party_2.blind_receive();
+    let recipient_map_1 = HashMap::from([(
+        asset.asset_id.clone(),
+        vec![Recipient {
+            assignment: Assignment::Fungible(amount),
+            recipient_id: receive_data_1.recipient_id.clone(),
+            witness_data: None,
+            transport_endpoints: TRANSPORT_ENDPOINTS.clone(),
+        }],
+    )]);
+    let txid_1 = party_1.send_retry(&recipient_map_1);
+    assert!(!txid_1.is_empty());
+    let _guard = stop_mining_when_alone();
+    party_2.wait_for_refresh(None);
+    party_1.wait_for_refresh(Some(&asset.asset_id));
+    force_mine_no_resume_when_alone(false);
+    party_2.wait_for_refresh(None);
+    party_1.wait_for_refresh(Some(&asset.asset_id));
+    assert!(party_2.check_test_transfer_status_recipient(
+        &receive_data_1.recipient_id,
+        TransferStatus::Settled
+    ));
+
+    // 2nd transfer: wallet 1 > wallet 2 with min_confirmations = 2
+    // txid_1 has only one confirmation, so the transfer parks in WaitingSafeHeight
+    let receive_data_2 = party_2
+        .wallet
+        .blind_receive(
+            None,
+            Assignment::Any,
+            (now().unix_timestamp() + DURATION_RCV_TRANSFER as i64) as u64,
+            TRANSPORT_ENDPOINTS.clone(),
+            2,
+        )
+        .unwrap();
+    let recipient_map_2 = HashMap::from([(
+        asset.asset_id.clone(),
+        vec![Recipient {
+            assignment: Assignment::Fungible(amount),
+            recipient_id: receive_data_2.recipient_id.clone(),
+            witness_data: None,
+            transport_endpoints: TRANSPORT_ENDPOINTS.clone(),
+        }],
+    )]);
+    let txid_2 = party_1.send_retry(&recipient_map_2);
+    assert!(!txid_2.is_empty());
+
+    // transfer parks in WaitingSafeHeight because it contains unsafe history
+    party_2.wait_for_refresh_raw(None, Some(&[receive_data_2.batch_transfer_idx]));
+    assert!(party_2.check_test_transfer_status_recipient(
+        &receive_data_2.recipient_id,
+        TransferStatus::WaitingSafeHeight
+    ));
+
+    // refreshing with a non-empty filter must not panic on the WaitingSafeHeight transfer;
+    // the transfer doesn't match the filter, so it's skipped and nothing changes
+    let filter = RefreshFilter {
+        status: RefreshTransferStatus::WaitingCounterparty,
+        incoming: true,
+    };
+    let refresh_res = party_2.refresh_result(None, &[filter]);
+    assert!(!refresh_res.unwrap().transfers_changed());
+
+    // refreshing with a non-empty filter that includes WaitingSafeHeight must not panic;
+    // the transfer matches the filter, so it's refreshed but status remains the same because we didn't mine
+    let filter = RefreshFilter {
+        status: RefreshTransferStatus::WaitingSafeHeight,
+        incoming: true,
+    };
+    let refresh_res = party_2.refresh_result(None, std::slice::from_ref(&filter));
+    assert!(!refresh_res.unwrap().transfers_changed());
+
+    // mine a block so the transfer reaches safe height: receiver ACKs and waits for the broadcast
+    force_mine_no_resume_when_alone(false);
+    let refresh_res = party_2.refresh_result(None, &[filter]);
+    assert!(refresh_res.unwrap().transfers_changed());
+    assert!(party_2.check_test_transfer_status_recipient(
+        &receive_data_2.recipient_id,
+        TransferStatus::WaitingBroadcast
     ));
 }

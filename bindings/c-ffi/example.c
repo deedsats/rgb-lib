@@ -1,6 +1,7 @@
 #include "rgblib.h"
 #include <json-c/json.h>
 #include <stdio.h>
+#include <time.h>
 
 int main() {
     const char *bitcoin_network = "Regtest";
@@ -78,8 +79,10 @@ int main() {
     printf("BTC balance: %s\n", btc_balance_1);
 
     printf("Wallet is going online...\n");
-    CResultString online_res =
-        rgblib_go_online(wlt, false, "tcp://localhost:50001");
+    const char *online_options =
+        "{ \"indexer_url\": \"tcp://localhost:50001\", "
+        "\"skip_consistency_check\": false, \"vanilla_sync_lookback\": 20 }";
+    CResultString online_res = rgblib_go_online(wlt, online_options);
     if (online_res.result == Err) {
         printf("ERR: %s\n", online_res.inner);
         return EXIT_FAILURE;
@@ -154,8 +157,10 @@ int main() {
 
     const char *assignment = "{\"Fungible\":77}";
     const char *transport_endpoints = "[\"rpc://127.0.0.1:3000/json-rpc\"]";
+    char expiration_timestamp[32];
+    sprintf(expiration_timestamp, "%lld", (long long)time(NULL) + 86400);
     CResultString receive_data_res = rgblib_blind_receive(
-        wlt, NULL, assignment, NULL, transport_endpoints, "1");
+        wlt, NULL, assignment, expiration_timestamp, transport_endpoints, "1");
     if (receive_data_res.result == Ok) {
         printf("Receive data: %s\n", receive_data_res.inner);
     } else {
@@ -164,7 +169,7 @@ int main() {
     }
 
     CResultString sync_res = rgblib_sync(
-        wlt, online, "{\"keychain\":\"Colored\",\"type\":\"FullSync\"}");
+        wlt, online, "{\"keychain\":\"Colored\",\"strategy\":\"FullSync\"}");
     if (sync_res.result == Ok) {
         printf("Synced\n");
     } else {

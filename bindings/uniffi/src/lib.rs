@@ -107,6 +107,7 @@ pub struct InvoiceData {
     pub network: BitcoinNetwork,
     pub expiration_timestamp: Option<u64>,
     pub transport_endpoints: Vec<String>,
+    pub unknown_query_params: HashMap<String, String>,
 }
 impl From<RgbLibInvoiceData> for InvoiceData {
     fn from(orig: RgbLibInvoiceData) -> Self {
@@ -119,6 +120,7 @@ impl From<RgbLibInvoiceData> for InvoiceData {
             network: orig.network,
             expiration_timestamp: orig.expiration_timestamp,
             transport_endpoints: orig.transport_endpoints,
+            unknown_query_params: orig.unknown_query_params,
         }
     }
 }
@@ -133,6 +135,7 @@ impl From<InvoiceData> for RgbLibInvoiceData {
             network: orig.network,
             expiration_timestamp: orig.expiration_timestamp,
             transport_endpoints: orig.transport_endpoints,
+            unknown_query_params: orig.unknown_query_params,
         }
     }
 }
@@ -940,6 +943,20 @@ impl Wallet {
         })
     }
 
+    fn load(
+        data_dir: String,
+        master_fingerprint: String,
+        mnemonic: Option<String>,
+    ) -> Result<Self, RgbLibError> {
+        Ok(Wallet {
+            wallet_mutex: Mutex::new(RgbLibWallet::load(
+                &data_dir,
+                &master_fingerprint,
+                mnemonic,
+            )?),
+        })
+    }
+
     fn _get_wallet(&self) -> MutexGuard<'_, RgbLibWallet> {
         self.wallet_mutex.lock().expect("wallet")
     }
@@ -982,7 +999,7 @@ impl Wallet {
         &self,
         asset_id: Option<String>,
         assignment: Assignment,
-        expiration_timestamp: Option<u64>,
+        expiration_timestamp: u64,
         transport_endpoints: Vec<String>,
         min_confirmations: u8,
     ) -> Result<ReceiveData, RgbLibError> {
@@ -999,7 +1016,7 @@ impl Wallet {
         &self,
         asset_id: Option<String>,
         assignment: Assignment,
-        expiration_timestamp: Option<u64>,
+        expiration_timestamp: u64,
         transport_endpoints: Vec<String>,
         min_confirmations: u8,
     ) -> Result<ReceiveData, RgbLibError> {
@@ -1320,7 +1337,7 @@ impl Wallet {
         donation: bool,
         fee_rate: u64,
         min_confirmations: u8,
-        expiration_timestamp: Option<u64>,
+        expiration_timestamp: u64,
     ) -> Result<OperationResult, RgbLibError> {
         self._get_wallet().send(
             online,
@@ -1339,7 +1356,7 @@ impl Wallet {
         donation: bool,
         fee_rate: u64,
         min_confirmations: u8,
-        expiration_timestamp: Option<u64>,
+        expiration_timestamp: u64,
         dry_run: bool,
     ) -> Result<SendBeginResult, RgbLibError> {
         self._get_wallet().send_begin(
@@ -1359,6 +1376,28 @@ impl Wallet {
         signed_psbt: String,
     ) -> Result<OperationResult, RgbLibError> {
         self._get_wallet().send_end(online, signed_psbt)
+    }
+
+    fn provide_out_of_band_consignment(
+        &self,
+        online: Online,
+        consignment_path: String,
+        media_file_paths: Vec<String>,
+    ) -> Result<HashMap<i32, RefreshedTransfer>, RgbLibError> {
+        self._get_wallet().provide_out_of_band_consignment(
+            online,
+            consignment_path,
+            media_file_paths,
+        )
+    }
+
+    fn provide_out_of_band_ack(
+        &self,
+        online: Online,
+        recipient_id: String,
+    ) -> Result<Option<OperationResult>, RgbLibError> {
+        self._get_wallet()
+            .provide_out_of_band_ack(online, recipient_id)
     }
 
     fn send_btc(
@@ -1491,7 +1530,7 @@ impl MultisigWallet {
         online: Online,
         asset_id: Option<String>,
         assignment: Assignment,
-        expiration_timestamp: Option<u64>,
+        expiration_timestamp: u64,
         transport_endpoints: Vec<String>,
         min_confirmations: u8,
     ) -> Result<ReceiveData, RgbLibError> {
@@ -1510,7 +1549,7 @@ impl MultisigWallet {
         online: Online,
         asset_id: Option<String>,
         assignment: Assignment,
-        expiration_timestamp: Option<u64>,
+        expiration_timestamp: u64,
         transport_endpoints: Vec<String>,
         min_confirmations: u8,
     ) -> Result<ReceiveData, RgbLibError> {
@@ -1743,7 +1782,7 @@ impl MultisigWallet {
         donation: bool,
         fee_rate: u64,
         min_confirmations: u8,
-        expiration_timestamp: Option<u64>,
+        expiration_timestamp: u64,
     ) -> Result<InitOperationResult, RgbLibError> {
         self._get_wallet().send_init(
             online,
