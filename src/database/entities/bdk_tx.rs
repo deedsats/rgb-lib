@@ -7,24 +7,28 @@ pub struct Entity;
 
 impl EntityName for Entity {
     fn table_name(&self) -> &'static str {
-        "backup_info"
+        "bdk_tx"
     }
 }
 
 #[derive(Clone, Debug, PartialEq, DeriveModel, DeriveActiveModel, Eq)]
 pub struct Model {
     pub idx: i32,
-    pub last_backup_timestamp: String,
-    pub last_operation_timestamp: String,
-    pub last_processed_operation_idx: Option<i32>,
+    pub txid: String,
+    pub raw_tx: Option<Vec<u8>>,
+    pub first_seen: Option<String>,
+    pub last_seen: Option<String>,
+    pub last_evicted: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveColumn)]
 pub enum Column {
     Idx,
-    LastBackupTimestamp,
-    LastOperationTimestamp,
-    LastProcessedOperationIdx,
+    Txid,
+    RawTx,
+    FirstSeen,
+    LastSeen,
+    LastEvicted,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DerivePrimaryKey)]
@@ -40,23 +44,35 @@ impl PrimaryKeyTrait for PrimaryKey {
 }
 
 #[derive(Copy, Clone, Debug, EnumIter)]
-pub enum Relation {}
+pub enum Relation {
+    BdkAnchor,
+}
 
 impl ColumnTrait for Column {
     type EntityName = Entity;
     fn def(&self) -> ColumnDef {
         match self {
             Self::Idx => ColumnType::Integer.def(),
-            Self::LastBackupTimestamp => ColumnType::String(StringLen::None).def(),
-            Self::LastOperationTimestamp => ColumnType::String(StringLen::None).def(),
-            Self::LastProcessedOperationIdx => ColumnType::Integer.def().null(),
+            Self::Txid => ColumnType::String(StringLen::None).def().unique(),
+            Self::RawTx => ColumnType::VarBinary(StringLen::None).def().null(),
+            Self::FirstSeen => ColumnType::String(StringLen::None).def().null(),
+            Self::LastSeen => ColumnType::String(StringLen::None).def().null(),
+            Self::LastEvicted => ColumnType::String(StringLen::None).def().null(),
         }
     }
 }
 
 impl RelationTrait for Relation {
     fn def(&self) -> RelationDef {
-        panic!("No RelationDef")
+        match self {
+            Self::BdkAnchor => Entity::has_many(super::bdk_anchor::Entity).into(),
+        }
+    }
+}
+
+impl Related<super::bdk_anchor::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::BdkAnchor.def()
     }
 }
 

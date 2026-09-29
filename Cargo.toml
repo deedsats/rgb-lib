@@ -6,7 +6,7 @@ authors = [
     "Nicola Busanello <nicola.busanello@gmail.com>",
 ]
 edition = "2024"
-rust-version = "1.88.0"
+rust-version = "1.94.0"
 repository = "https://github.com/RGB-Tools/rgb-lib"
 homepage = "https://github.com/RGB-Tools/rgb-lib"
 license = "MIT"
@@ -21,7 +21,6 @@ base64 = { version = "0.22.1", default-features = false, features = [
     "std",
 ] }
 bdk_wallet = { version = "=3.1.0", default-features = false, features = [
-    "file_store",
     "keys-bip39",
     "std",
 ] }
@@ -49,13 +48,13 @@ rustls = { version = "0.23", default-features = false }
 scrypt = { version = "0.12.0", default-features = false, features = [
     "phc",
 ] }
-sea-orm = { version = "1.1.19", default-features = false, features = [
+sea-orm = { version = "2.0.1", default-features = false, features = [
     "macros",
     "runtime-tokio-rustls",
     "sqlx-sqlite",
     "with-json",
 ] }
-sea-query = "0.32.7"
+sea-query = "1.0.1"
 serde = { version = "^1.0", default-features = false, features = [
     "derive",
 ] }
@@ -115,8 +114,11 @@ version = "0.13"
 features = ["rustls"]
 
 [features]
-default = ["electrum"]
-all = ["electrum", "esplora"]
+default = ["electrum", "bdk_file_store_migration"]
+all = ["electrum", "esplora", "bdk_file_store_migration"]
+# import the BDK data of wallets created before the changeset moved into the rgb-lib DB; only
+# needed to upgrade such wallets, so it can be turned off to drop the bdk_file_store dependency
+bdk_file_store_migration = ["bdk_wallet/file_store"]
 electrum = [
     "bdk_electrum",
     "reqwest",

@@ -247,7 +247,7 @@ fn success() {
     // rate that requires additional inputs be added to cover fee costs
     let transport_endpoints = vec![
         format!("rpc://{PROXY_HOST_MOD_PROTO}"),
-        format!("rpc://127.6.6.6:7777/json-rpc"),
+        "rpc://127.6.6.6:7777/json-rpc".to_string(),
         format!("rpc://{PROXY_HOST}"),
     ];
     let receive_data_invalid_unreachable = rcv_party.blind_receive_with_endpoints(
@@ -2716,7 +2716,7 @@ fn fail() {
 
     // transport endpoints: no valid endpoints (down, modified)
     let transport_endpoints = vec![
-        format!("rpc://127.6.6.6:7777/json-rpc"),
+        "rpc://127.6.6.6:7777/json-rpc".to_string(),
         format!("rpc://{PROXY_HOST_MOD_PROTO}"),
     ];
     let recipient_map = HashMap::from([(
@@ -2737,10 +2737,10 @@ fn fail() {
 
     // transport endpoints: too many endpoints
     let transport_endpoints = vec![
-        format!("rgbhttpjsonrpc:127.0.0.1:3000/json-rpc"),
-        format!("rgbhttpjsonrpc:127.0.0.1:3001/json-rpc"),
-        format!("rgbhttpjsonrpc:127.0.0.1:3002/json-rpc"),
-        format!("rgbhttpjsonrpc:127.0.0.1:3003/json-rpc"),
+        "rgbhttpjsonrpc:127.0.0.1:3000/json-rpc".to_string(),
+        "rgbhttpjsonrpc:127.0.0.1:3001/json-rpc".to_string(),
+        "rgbhttpjsonrpc:127.0.0.1:3002/json-rpc".to_string(),
+        "rgbhttpjsonrpc:127.0.0.1:3003/json-rpc".to_string(),
     ];
     let recipient_map = HashMap::from([(
         asset.asset_id.clone(),
@@ -3564,7 +3564,7 @@ fn send_to_oneself() {
 #[cfg(feature = "electrum")]
 #[test]
 #[parallel]
-fn send_to_oneself_crash() {
+fn send_to_oneself_crash_dry_run() {
     initialize();
 
     let amount_1: u64 = 66;
@@ -3621,7 +3621,7 @@ fn send_to_oneself_crash() {
     let crashed = party.wallet.send_end(party.online, signed_psbt.clone());
     assert_matches!(crashed, Err(Error::Internal { .. }));
 
-    // chcek the send transfer was not persisted
+    // check the send transfer was not persisted
     let transfers = party.list_transfers(Some(&asset.asset_id));
     assert_eq!(
         transfers
@@ -3670,6 +3670,276 @@ fn send_to_oneself_crash() {
             .count(),
         1
     );
+}
+
+#[cfg(feature = "electrum")]
+#[test]
+#[parallel]
+fn send_to_oneself_crash_no_dry_run() {
+    initialize();
+
+    let amount_1: u64 = 66;
+    let amount_2: u64 = 33;
+
+    // wallet
+    let mut party = get_funded_party!();
+
+    // issue
+    let asset = party.issue_asset_nia(None);
+
+    // self-send recipients
+    let receive_data_1 = party.blind_receive();
+    let receive_data_2 = party.witness_receive();
+    let recipient_map = HashMap::from([(
+        asset.asset_id.clone(),
+        vec![
+            Recipient {
+                assignment: Assignment::Fungible(amount_1),
+                recipient_id: receive_data_1.recipient_id.clone(),
+                witness_data: None,
+                transport_endpoints: TRANSPORT_ENDPOINTS.clone(),
+            },
+            Recipient {
+                assignment: Assignment::Fungible(amount_2),
+                recipient_id: receive_data_2.recipient_id.clone(),
+                witness_data: Some(WitnessData {
+                    amount_sat: 1000,
+                    blinding: None,
+                }),
+                transport_endpoints: TRANSPORT_ENDPOINTS.clone(),
+            },
+        ],
+    )]);
+
+    // send_begin with dry_run=false, so the send transfer is persisted with status Initiated
+    let begin = party
+        .wallet
+        .send_begin(
+            party.online,
+            recipient_map.clone(),
+            false,
+            FEE_RATE,
+            MIN_CONFIRMATIONS,
+            default_send_expiration(),
+            false,
+        )
+        .unwrap();
+    let signed_psbt = party.wallet.sign_psbt(begin.psbt, None).unwrap();
+
+    // the send batch transfer exists and already carries the txid
+    let initiated: Vec<_> = party
+        .db_batch_transfers()
+        .into_iter()
+        .filter(|t| t.status == TransferStatus::Initiated)
+        .collect();
+    assert_eq!(initiated.len(), 1);
+    let txid = initiated[0].txid.clone().unwrap();
+    let initiated_idx = initiated[0].idx;
+
+    // first send_end "crashes" after posting the consignment
+    println!("setting MOCK_SEND_END_CRASH");
+    MOCK_SEND_END_CRASH.replace(Some(()));
+    let crashed = party.wallet.send_end(party.online, signed_psbt.clone());
+    assert_matches!(crashed, Err(Error::Internal { .. }));
+
+    // refreshing the incoming transfers accepts the (already posted) consignment and stamps
+    // the send txid onto them, so now 3 batch transfers share the same txid
+    party.wait_for_refresh_raw(None, Some(&[2, 3]));
+    assert_eq!(party.db_batch_transfers_filtered(&txid).len(), 3);
+
+    // completing the send must update the existing send batch transfer, not create a new one
+    let res = party.wallet.send_end(party.online, signed_psbt).unwrap();
+    assert_eq!(res.txid, txid);
+    assert_eq!(res.batch_transfer_idx, initiated_idx);
+
+    let batch_transfers = party.db_batch_transfers_filtered(&txid);
+    assert_eq!(batch_transfers.len(), 3);
+    assert!(
+        batch_transfers
+            .iter()
+            .all(|t| t.status != TransferStatus::Initiated)
+    );
+
+    let transfers = party.list_transfers(Some(&asset.asset_id));
+    assert_eq!(transfers.len(), 5);
+    assert_eq!(
+        transfers
+            .iter()
+            .filter(|t| t.kind == TransferKind::Send)
+            .count(),
+        2
+    );
+}
+
+/// Regression test for `send_end` panicking with "exists at this point" when a non-dry-run
+/// `send_begin` produced `extra_allocations`.
+///
+/// A single colorable UTXO holds allocations of two assets; only one of them is sent, so the other
+/// one is moved to change as an extra allocation. With `dry_run = false` the batch is persisted as
+/// Initiated together with a non-user-driven asset transfer for the extra asset, which has no
+/// counterpart in the transfer data `transfers` map. `send_end` must complete anyway.
+#[cfg(feature = "electrum")]
+fn send_extra_allocations_no_dry_run_impl(donation: bool) {
+    let amount: u64 = 66;
+    let supply_cfa = AMOUNT * 2;
+
+    // wallets
+    let mut party = get_funded_noutxo_party!();
+    let mut rcv_party = get_funded_party!();
+    party.create_utxos(false, Some(1), None, FEE_RATE, None);
+
+    // issue two assets, both allocated to the same (only) colorable UTXO
+    let asset = party.issue_asset_nia(None);
+    let asset_extra = party.issue_asset_cfa(Some(&[supply_cfa]), None);
+    let unspents = party.list_unspents(true);
+    let unspents_with_rgb_allocations: Vec<Unspent> = unspents
+        .into_iter()
+        .filter(|u| !u.rgb_allocations.is_empty())
+        .collect();
+    assert_eq!(unspents_with_rgb_allocations.len(), 1);
+    let allocation_asset_ids: Vec<String> = unspents_with_rgb_allocations
+        .first()
+        .unwrap()
+        .rgb_allocations
+        .clone()
+        .into_iter()
+        .map(|a| a.asset_id.unwrap_or_else(|| s!("")))
+        .collect();
+    assert!(allocation_asset_ids.contains(&asset.asset_id));
+    assert!(allocation_asset_ids.contains(&asset_extra.asset_id));
+
+    // one more UTXO to receive the change
+    party.create_utxos(false, Some(1), None, FEE_RATE, None);
+
+    // send only the first asset, with dry_run=false so the batch is persisted as Initiated
+    let receive_data = rcv_party.blind_receive();
+    let recipient_map = HashMap::from([(
+        asset.asset_id.clone(),
+        vec![Recipient {
+            assignment: Assignment::Fungible(amount),
+            recipient_id: receive_data.recipient_id.clone(),
+            witness_data: None,
+            transport_endpoints: TRANSPORT_ENDPOINTS.clone(),
+        }],
+    )]);
+    let begin = party
+        .wallet
+        .send_begin(
+            party.online,
+            recipient_map,
+            donation,
+            FEE_RATE,
+            MIN_CONFIRMATIONS,
+            default_send_expiration(),
+            false,
+        )
+        .unwrap();
+    let batch_transfer_idx = begin.batch_transfer_idx.unwrap();
+
+    // the Initiated batch holds a user-driven asset transfer for the sent asset and a
+    // non-user-driven one (with no transfers) for the extra asset moved to change
+    let batch_transfers: Vec<_> = party
+        .db_batch_transfers()
+        .into_iter()
+        .filter(|b| b.idx == batch_transfer_idx)
+        .collect();
+    assert_eq!(batch_transfers.len(), 1);
+    let batch_transfer = batch_transfers.first().unwrap();
+    assert_eq!(batch_transfer.status, TransferStatus::Initiated);
+    let txid = batch_transfer.txid.clone().unwrap();
+    let asset_transfers = party.db_asset_transfers_filtered(batch_transfer_idx);
+    assert_eq!(asset_transfers.len(), 2);
+    let asset_transfer = asset_transfers
+        .iter()
+        .find(|a| a.asset_id == Some(asset.asset_id.clone()))
+        .unwrap();
+    let asset_extra_asset_transfer = asset_transfers
+        .iter()
+        .find(|a| a.asset_id == Some(asset_extra.asset_id.clone()))
+        .unwrap();
+    assert!(asset_transfer.user_driven);
+    assert_eq!(party.db_transfers_filtered(asset_transfer.idx).len(), 1);
+    assert!(!asset_extra_asset_transfer.user_driven);
+    assert!(
+        party
+            .db_transfers_filtered(asset_extra_asset_transfer.idx)
+            .is_empty()
+    );
+
+    // sign and complete the send: this used to panic with "exists at this point"
+    let signed_psbt = party.wallet.sign_psbt(begin.psbt, None).unwrap();
+    let res = party.wallet.send_end(party.online, signed_psbt).unwrap();
+    assert_eq!(res.txid, txid);
+    assert_eq!(res.batch_transfer_idx, batch_transfer_idx);
+
+    // the existing batch has been updated (not duplicated) and the transport endpoint of the
+    // send transfer has been marked as used
+    let expected_status = if donation {
+        TransferStatus::WaitingConfirmations
+    } else {
+        TransferStatus::WaitingCounterparty
+    };
+    assert!(party.check_test_transfer_status_sender(&txid, expected_status));
+    let (transfers, asset_transfers, _) = party.get_test_transfers_sender(&txid);
+    assert_eq!(asset_transfers.len(), 2);
+    let transfer = transfers.get(&asset.asset_id).unwrap().first().unwrap();
+    let tte_data = party.db_transfer_transport_endpoints_data(transfer.idx);
+    assert_eq!(tte_data.len(), 1);
+    assert!(tte_data.first().unwrap().0.used);
+
+    // settle the transfer
+    rcv_party.wait_for_refresh(None);
+    if !donation {
+        // the sender waits for the recipient ACK before broadcasting, a donation has already
+        // been broadcast by send_end
+        party.wait_for_refresh(Some(&asset.asset_id));
+    }
+    assert!(party.check_test_transfer_status_sender(&txid, TransferStatus::WaitingConfirmations));
+    mine(false);
+    rcv_party.wait_for_refresh(None);
+    party.wait_for_refresh(Some(&asset.asset_id));
+    assert!(party.check_test_transfer_status_sender(&txid, TransferStatus::Settled));
+    assert!(
+        rcv_party.check_test_transfer_status_recipient(
+            &receive_data.recipient_id,
+            TransferStatus::Settled
+        )
+    );
+
+    // the sent asset moved, the extra asset stayed with the sender
+    assert_eq!(
+        party.get_asset_balance(&asset.asset_id).settled,
+        AMOUNT - amount
+    );
+    assert_eq!(rcv_party.get_asset_balance(&asset.asset_id).settled, amount);
+    assert_eq!(
+        party.get_asset_balance(&asset_extra.asset_id).settled,
+        supply_cfa
+    );
+    let unspents = party.list_unspents(true);
+    assert!(unspents.iter().any(|u| {
+        u.rgb_allocations
+            .iter()
+            .any(|a| a.asset_id == Some(asset_extra.asset_id.clone()) && a.settled)
+    }));
+}
+
+#[cfg(feature = "electrum")]
+#[test]
+#[parallel]
+fn send_extra_allocations_no_dry_run() {
+    initialize();
+
+    send_extra_allocations_no_dry_run_impl(false);
+}
+
+#[cfg(feature = "electrum")]
+#[test]
+#[parallel]
+fn send_extra_allocations_no_dry_run_donation() {
+    initialize();
+
+    send_extra_allocations_no_dry_run_impl(true);
 }
 
 #[cfg(feature = "electrum")]

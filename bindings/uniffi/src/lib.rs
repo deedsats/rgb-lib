@@ -1,3 +1,4 @@
+#![allow(clippy::large_const_arrays)]
 #![allow(clippy::too_many_arguments)]
 
 use std::{
@@ -12,10 +13,10 @@ use rgb_lib::{
     keys::{Keys, WitnessVersion},
     utils::BitcoinNetwork,
     wallet::{
-        Address as RgbLibAddress, AssetCFA, AssetIFA, AssetNIA, AssetUDA, Assets,
-        AssignmentsCollection, Balance, BlockTime, BtcBalance, BurnBeginResult, BurnDetails,
-        Cosigner as CosignerData, DatabaseType, EmbeddedMedia, HubInfo, InflateBeginResult,
-        InflateDetails, InitOperationResult, Invoice as RgbLibInvoice,
+        Address as RgbLibAddress, AssetCFA, AssetFilter as RgbLibAssetFilter, AssetIFA, AssetNIA,
+        AssetUDA, Assets, AssignmentsCollection, Balance, BlockTime, BtcBalance, BurnBeginResult,
+        BurnDetails, Cosigner as CosignerData, DatabaseType, EmbeddedMedia, HubInfo,
+        InflateBeginResult, InflateDetails, InitOperationResult, Invoice as RgbLibInvoice,
         InvoiceData as RgbLibInvoiceData, Media, Metadata, MultisigKeys, MultisigOnlineOptions,
         MultisigVotingStatus as RgbLibMultisigVotingStatus, MultisigWallet as RgbLibMultisigWallet,
         Online, OnlineOptions, Operation as RgbLibOperation, OperationInfo as RgbLibOperationInfo,
@@ -37,7 +38,7 @@ use rgb_lib::{
 
 uniffi::include_scaffolding!("rgb-lib");
 
-// temporary solution needed because the Enum attribute doesn't support the Remote one
+// temporary solution needed because the UDL Enum and Remote attributes are incompatible with each other
 pub enum SyncKeychain {
     Colored,
     Vanilla { lookback: u32 },
@@ -71,7 +72,22 @@ impl From<SyncOptions> for RgbLibSyncOptions {
     }
 }
 
-// temporary solution needed because the Enum attribute doesn't support the Remote one
+pub enum AssetFilter {
+    AnyOrNone,
+    None,
+    Id { asset_id: String },
+}
+impl From<AssetFilter> for RgbLibAssetFilter {
+    fn from(orig: AssetFilter) -> Self {
+        match orig {
+            AssetFilter::AnyOrNone => RgbLibAssetFilter::AnyOrNone,
+            AssetFilter::None => RgbLibAssetFilter::None,
+            AssetFilter::Id { asset_id } => RgbLibAssetFilter::Id(asset_id),
+        }
+    }
+}
+
+// temporary solution needed because the UDL Enum and Remote attributes are incompatible with each other
 pub enum Assignment {
     Fungible { amount: u64 },
     NonFungible,
@@ -389,7 +405,7 @@ impl From<RgbInspection> for RgbLibRgbInspection {
     }
 }
 
-// temporary solution needed because the Enum attribute doesn't support the Remote one
+// temporary solution needed because the UDL Enum and Remote attributes are incompatible with each other
 pub enum Operation {
     CreateUtxosToReview {
         psbt: String,
@@ -780,7 +796,7 @@ impl From<RgbLibOperationInfo> for OperationInfo {
     }
 }
 
-// temporary solution needed because the Enum attribute doesn't support the Remote one
+// temporary solution needed because the UDL Enum and Remote attributes are incompatible with each other
 pub enum RespondToOperation {
     Ack { signed_psbt: String },
     Nack,
@@ -1296,10 +1312,14 @@ impl Wallet {
         self._get_wallet().list_transactions(online, skip_sync)
     }
 
-    fn list_transfers(&self, asset_id: Option<String>) -> Result<Vec<Transfer>, RgbLibError> {
+    fn list_transfers(
+        &self,
+        asset_filter: AssetFilter,
+        txid: Option<String>,
+    ) -> Result<Vec<Transfer>, RgbLibError> {
         Ok(self
             ._get_wallet()
-            .list_transfers(asset_id)?
+            .list_transfers(asset_filter.into(), txid)?
             .into_iter()
             .map(|t| t.into())
             .collect())
@@ -1741,10 +1761,14 @@ impl MultisigWallet {
         self._get_wallet().list_transactions(online, skip_sync)
     }
 
-    fn list_transfers(&self, asset_id: Option<String>) -> Result<Vec<Transfer>, RgbLibError> {
+    fn list_transfers(
+        &self,
+        asset_filter: AssetFilter,
+        txid: Option<String>,
+    ) -> Result<Vec<Transfer>, RgbLibError> {
         Ok(self
             ._get_wallet()
-            .list_transfers(asset_id)?
+            .list_transfers(asset_filter.into(), txid)?
             .into_iter()
             .map(|t| t.into())
             .collect())

@@ -58,15 +58,15 @@ fn check_wallet(
 #[test]
 #[parallel]
 fn success() {
-    create_test_data_dir();
+    let data_dir = PrivateDataDir::new();
 
     // with private keys
-    let party = offline_party!(get_test_wallet(true, None));
+    let party = offline_party!(data_dir.wallet(true, None));
     let bak_info_after = party.db_backup_info_opt();
     assert!(bak_info_after.is_none());
 
     // without private keys
-    let party = offline_party!(get_test_wallet(false, None));
+    let party = offline_party!(data_dir.wallet(false, None));
     check_wallet(&party, BitcoinNetwork::Regtest, None);
 
     // with custom vanilla keychain
@@ -76,7 +76,7 @@ fn success() {
     let party = offline_party!(
         Wallet::new(
             WalletData {
-                data_dir: get_test_data_dir_string(),
+                data_dir: data_dir.string(),
                 bitcoin_network,
                 database_type: DatabaseType::Sqlite,
                 max_allocations_per_utxo: MAX_ALLOCATIONS_PER_UTXO,
@@ -93,10 +93,10 @@ fn success() {
 #[test]
 #[parallel]
 fn signet_success() {
-    create_test_data_dir();
+    let data_dir = PrivateDataDir::new();
 
     let bitcoin_network = BitcoinNetwork::Signet;
-    let mut party = offline_party!(get_test_wallet_with_net(true, None, bitcoin_network));
+    let mut party = offline_party!(data_dir.wallet_with_net(true, None, bitcoin_network));
     check_wallet(&party, bitcoin_network, None);
     let indexer_url = "ssl://electrum.iriswallet.com:50033";
     party.go_online(false, Some(indexer_url));
@@ -108,10 +108,10 @@ fn signet_success() {
 #[test]
 #[parallel]
 fn testnet_success() {
-    create_test_data_dir();
+    let data_dir = PrivateDataDir::new();
 
     let bitcoin_network = BitcoinNetwork::Testnet;
-    let mut party = offline_party!(get_test_wallet_with_net(true, None, bitcoin_network));
+    let mut party = offline_party!(data_dir.wallet_with_net(true, None, bitcoin_network));
     check_wallet(&party, bitcoin_network, None);
     let indexer_url = "ssl://electrum.iriswallet.com:50013";
     party.go_online(false, Some(indexer_url));
@@ -123,10 +123,10 @@ fn testnet_success() {
 #[test]
 #[parallel]
 fn testnet4_success() {
-    create_test_data_dir();
+    let data_dir = PrivateDataDir::new();
 
     let bitcoin_network = BitcoinNetwork::Testnet4;
-    let mut party = offline_party!(get_test_wallet_with_net(true, None, bitcoin_network));
+    let mut party = offline_party!(data_dir.wallet_with_net(true, None, bitcoin_network));
     check_wallet(&party, bitcoin_network, None);
     let indexer_url = "ssl://electrum.iriswallet.com:50053";
     party.go_online(false, Some(indexer_url));
@@ -138,14 +138,14 @@ fn testnet4_success() {
 #[test]
 #[parallel]
 fn mainnet_success_electrum() {
-    create_test_data_dir();
+    let data_dir = PrivateDataDir::new();
 
     let bitcoin_network = BitcoinNetwork::Mainnet;
     let keys = generate_keys(bitcoin_network, WitnessVersion::Taproot);
     let mut party = offline_party!(
         Wallet::new(
             WalletData {
-                data_dir: get_test_data_dir_string(),
+                data_dir: data_dir.string(),
                 bitcoin_network,
                 database_type: DatabaseType::Sqlite,
                 max_allocations_per_utxo: MAX_ALLOCATIONS_PER_UTXO,
@@ -169,14 +169,14 @@ fn mainnet_success_electrum() {
 #[ignore = "frequently fails due to timeout"]
 #[parallel]
 fn mainnet_success_esplora() {
-    create_test_data_dir();
+    let data_dir = PrivateDataDir::new();
 
     let bitcoin_network = BitcoinNetwork::Mainnet;
     let keys = generate_keys(bitcoin_network, WitnessVersion::Taproot);
     let mut party = offline_party!(
         Wallet::new(
             WalletData {
-                data_dir: get_test_data_dir_string(),
+                data_dir: data_dir.string(),
                 bitcoin_network,
                 database_type: DatabaseType::Sqlite,
                 max_allocations_per_utxo: MAX_ALLOCATIONS_PER_UTXO,
@@ -198,7 +198,8 @@ fn mainnet_success_esplora() {
 #[test]
 #[parallel]
 fn fail() {
-    let wallet = get_test_wallet(true, None);
+    let data_dir = PrivateDataDir::new();
+    let wallet = data_dir.wallet(true, None);
     let wallet_data = wallet.get_wallet_data();
     let keys = wallet.get_keys();
 
@@ -402,11 +403,10 @@ fn watch_only_success() {
     assert_eq!(unspents.len(), UTXO_NUM as usize + 1);
 }
 
-#[cfg(feature = "electrum")]
 #[test]
 #[parallel]
 fn watch_only_fail() {
-    initialize();
+    let data_dir = PrivateDataDir::new();
 
     let bitcoin_network = BitcoinNetwork::Regtest;
     let keys = generate_keys(bitcoin_network, WitnessVersion::Taproot);
@@ -416,7 +416,7 @@ fn watch_only_fail() {
     keys_bad.master_fingerprint = s!("invalid");
     let result = Wallet::new(
         WalletData {
-            data_dir: get_test_data_dir_string(),
+            data_dir: data_dir.string(),
             bitcoin_network,
             database_type: DatabaseType::Sqlite,
             max_allocations_per_utxo: MAX_ALLOCATIONS_PER_UTXO,
@@ -432,7 +432,8 @@ fn watch_only_fail() {
 #[parallel]
 fn get_account_xpub_success() {
     // wallet
-    let wallet = get_test_wallet(true, None);
+    let data_dir = PrivateDataDir::new();
+    let wallet = data_dir.wallet(true, None);
     let mnemonic = wallet.get_keys().mnemonic.clone().unwrap();
 
     // get colored account xpub
@@ -463,7 +464,8 @@ fn get_account_xpub_success() {
 #[parallel]
 fn get_descriptors_success() {
     // wallet
-    let wallet = get_test_wallet(true, None);
+    let data_dir = PrivateDataDir::new();
+    let wallet = data_dir.wallet(true, None);
 
     // get descriptors from keys
     let keys = wallet.get_keys();
@@ -622,4 +624,63 @@ fn supported_schemas() {
     if let Err(e) = result {
         assert_matches!(e, Error::CannotUseIfaOnMainnet);
     }
+}
+
+// Wallets created before the BDK changeset moved into the rgb-lib DB keep their data in a
+// bdk_file_store file. Their revealed-address indices cannot be rebuilt by a rescan, which only
+// restores up to the last *used* index, so wallet setup has to import them.
+#[cfg(feature = "bdk_file_store_migration")]
+#[test]
+#[parallel]
+fn legacy_bdk_store_is_imported() {
+    // a wallet with addresses that have been revealed but never used
+    let data_dir = PrivateDataDir::new();
+    let mut donor = data_dir.wallet(true, None);
+    for _ in 0..5 {
+        donor.get_address().unwrap();
+    }
+    let descriptors = donor.get_descriptors();
+    let txn = donor.database().begin_transaction().unwrap();
+    let legacy_changeset = txn.get_bdk_changeset().unwrap();
+    txn.commit().unwrap();
+    let expected = legacy_changeset.indexer.last_revealed.clone();
+    assert!(!expected.is_empty());
+
+    // a wallet directory holding only the legacy file store, as an upgraded wallet would have
+    let dir = PrivateDataDir::new();
+    let mut store =
+        Store::<ChangeSet>::create(BDK_DB_NAME.as_bytes(), dir.sub_path(BDK_DB_NAME)).unwrap();
+    store.append(&legacy_changeset).unwrap();
+    drop(store);
+
+    let database = setup_db(dir.path()).unwrap();
+    let txn = database.begin_transaction().unwrap();
+    let bdk_wallet = setup_bdk(
+        &txn,
+        dir.path(),
+        descriptors.colored.clone(),
+        descriptors.vanilla.clone(),
+        false,
+        BitcoinNetwork::Regtest,
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    // the revealed indices survived the upgrade
+    assert_eq!(
+        bdk_wallet
+            .spk_index()
+            .last_revealed_index(KeychainKind::External),
+        donor
+            .bdk_wallet()
+            .spk_index()
+            .last_revealed_index(KeychainKind::External),
+    );
+    let txn = database.begin_transaction().unwrap();
+    let imported = txn.get_bdk_changeset().unwrap();
+    txn.commit().unwrap();
+    assert_eq!(imported.indexer.last_revealed, expected);
+
+    // the legacy store is gone, so an older rgb-lib cannot pick up the stale copy
+    assert!(!dir.sub_path(BDK_DB_NAME).exists());
 }

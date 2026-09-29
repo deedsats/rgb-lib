@@ -14,7 +14,7 @@
 //! RGB asset operations.
 //!
 //! ## Database
-//! A SQLite database is used to persist data to disk.
+//! A SQLite database is used to persist data to disk, including the BDK wallet data.
 //!
 //! Database support is designed in order to support multiple database backends. At the moment only
 //! SQLite is supported but adding more should be relatively easy.
@@ -137,7 +137,7 @@ use std::{
     panic,
     path::{Path, PathBuf},
     str::FromStr,
-    sync::{Arc, LazyLock},
+    sync::{Arc, LazyLock, Mutex},
     time::Duration,
 };
 
@@ -160,33 +160,36 @@ use bdk_esplora::{
         BlockingClient as EsploraClient, Builder as EsploraBuilder, Error as EsploraError,
     },
 };
-#[cfg(feature = "esplora")]
-use bdk_wallet::bitcoin::Txid;
+#[cfg(feature = "bdk_file_store_migration")]
+use bdk_wallet::file_store::Store;
 use bdk_wallet::{
-    ChangeSet, KeychainKind, LocalOutput, PersistedWallet, SignOptions, Wallet as BdkWallet,
+    ChangeSet, KeychainKind, LocalOutput, SignOptions, Wallet as BdkWallet,
     bitcoin::{
         Address as BdkAddress, Amount as BdkAmount, BlockHash, Network as BdkNetwork, NetworkKind,
-        OutPoint, OutPoint as BdkOutPoint, ScriptBuf, TxOut,
+        OutPoint, OutPoint as BdkOutPoint, ScriptBuf, Transaction as BdkTransaction, TxOut, Txid,
         bip32::{ChildNumber, DerivationPath, Fingerprint, KeySource, Xpriv, Xpub},
+        consensus::{Decodable, Encodable},
         hashes::{Hash as Sha256Hash, sha256},
         key::{Keypair, TapTweak, XOnlyPublicKey},
         psbt::{ExtractTxError, Psbt},
         secp256k1::Secp256k1,
     },
-    chain::{CanonicalizationParams, ChainPosition},
+    chain::{
+        BlockId, CanonicalizationParams, ChainPosition, ConfirmationBlockTime, DescriptorId, Merge,
+    },
     descriptor::Segwitv0,
-    file_store::Store,
     keys::{
         DerivableKey, DescriptorKey,
         DescriptorKey::{Public, Secret},
         ExtendedKey, GeneratableKey,
         bip39::{Language, Mnemonic, WordCount},
     },
+    miniscript::{Descriptor, DescriptorPublicKey},
 };
 #[cfg(any(feature = "electrum", feature = "esplora"))]
 use bdk_wallet::{
     Update,
-    bitcoin::{Transaction as BdkTransaction, blockdata::fee_rate::FeeRate, hashes::HashEngine},
+    bitcoin::{blockdata::fee_rate::FeeRate, hashes::HashEngine},
     chain::{
         DescriptorExt,
         spk_client::{FullScanRequest, FullScanResponse, SyncRequest, SyncResponse},
@@ -252,8 +255,9 @@ use schemata::{
 use scrypt::{Params, phc::Salt, scrypt};
 use sea_orm::{
     ActiveValue, ColumnTrait, ConnectOptions, Database, DatabaseConnection, DatabaseTransaction,
-    DbErr, DeriveActiveEnum, EntityTrait, EnumIter, IntoActiveValue, JsonValue, QueryFilter,
-    QueryOrder, QueryResult, TransactionTrait, TryGetError, TryGetable, TryIntoModel,
+    DbErr, DeriveActiveEnum, EntityTrait, EnumIter, JsonValue, QueryFilter, QueryOrder,
+    QueryResult, TransactionTrait, TryGetError, TryGetable, TryIntoModel,
+    sea_query::{Alias, Expr, ExprTrait, Func, OnConflict, SimpleExpr},
 };
 use serde::de::{self, Unexpected, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -338,7 +342,8 @@ use crate::{
     keys::{Keys, WitnessVersion},
     utils::{
         ACCOUNT, DumbResolver, KEYCHAIN_BTC, KEYCHAIN_RGB, LOG_FILE, PURPOSE, RgbRuntime,
-        adjust_canonicalization, beneficiary_from_script_buf, derive_account_xprv_from_mnemonic,
+        adjust_canonicalization, atomic_tmp_path, atomic_write, atomic_write_with,
+        beneficiary_from_script_buf, derive_account_xprv_from_mnemonic,
         from_str_or_number_mandatory, from_str_or_number_optional, get_account_xpubs,
         get_coin_type, get_descriptors, get_descriptors_from_xpubs, hash_bytes, hash_bytes_hex,
         load_rgb_runtime, now, parse_address_str, setup_logger, str_to_xpub,
