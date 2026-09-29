@@ -338,8 +338,10 @@ pub(crate) fn zip_dir(
     } else {
         path_in
     };
-    let entry_iterator = WalkDir::new(path_in).into_iter().filter_map(|e| e.ok());
-    for entry in entry_iterator {
+    for entry in WalkDir::new(path_in) {
+        let entry = entry.map_err(|e| Error::IO {
+            details: e.to_string(),
+        })?;
         let path = entry.path();
         let name = path.strip_prefix(prefix).map_err(InternalError::from)?;
         let name_str = name.to_str().ok_or_else(|| InternalError::Unexpected)?;
