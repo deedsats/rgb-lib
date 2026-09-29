@@ -69,7 +69,7 @@ fn success() {
     // output; its outpoint must be signed as well
     let transfers = party
         .wallet
-        .list_transfers(Some(asset.asset_id.clone()))
+        .list_transfers(AssetFilter::Id(asset.asset_id.clone()), None)
         .unwrap();
     let change_utxo = transfers
         .iter()
@@ -125,7 +125,7 @@ fn success() {
     assert_eq!(outpoints.len(), signatures.len());
     let transfers = party
         .wallet
-        .list_transfers(Some(asset.asset_id.clone()))
+        .list_transfers(AssetFilter::Id(asset.asset_id.clone()), None)
         .unwrap();
     let change_utxo = transfers
         .iter()

@@ -7,35 +7,35 @@ pub struct Entity;
 
 impl EntityName for Entity {
     fn table_name(&self) -> &'static str {
-        "backup_info"
+        "bdk_wallet"
     }
 }
 
 #[derive(Clone, Debug, PartialEq, DeriveModel, DeriveActiveModel, Eq)]
 pub struct Model {
-    pub idx: i32,
-    pub last_backup_timestamp: String,
-    pub last_operation_timestamp: String,
-    pub last_processed_operation_idx: Option<i32>,
+    pub id: i32,
+    pub descriptor: Option<String>,
+    pub change_descriptor: Option<String>,
+    pub network: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveColumn)]
 pub enum Column {
-    Idx,
-    LastBackupTimestamp,
-    LastOperationTimestamp,
-    LastProcessedOperationIdx,
+    Id,
+    Descriptor,
+    ChangeDescriptor,
+    Network,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DerivePrimaryKey)]
 pub enum PrimaryKey {
-    Idx,
+    Id,
 }
 
 impl PrimaryKeyTrait for PrimaryKey {
     type ValueType = i32;
     fn auto_increment() -> bool {
-        true
+        false
     }
 }
 
@@ -46,10 +46,10 @@ impl ColumnTrait for Column {
     type EntityName = Entity;
     fn def(&self) -> ColumnDef {
         match self {
-            Self::Idx => ColumnType::Integer.def(),
-            Self::LastBackupTimestamp => ColumnType::String(StringLen::None).def(),
-            Self::LastOperationTimestamp => ColumnType::String(StringLen::None).def(),
-            Self::LastProcessedOperationIdx => ColumnType::Integer.def().null(),
+            Self::Id => ColumnType::Integer.def(),
+            Self::Descriptor => ColumnType::String(StringLen::None).def().null(),
+            Self::ChangeDescriptor => ColumnType::String(StringLen::None).def().null(),
+            Self::Network => ColumnType::String(StringLen::None).def().null(),
         }
     }
 }

@@ -4,7 +4,11 @@
 
 use super::*;
 
-const BDK_DB_NAME: &str = "bdk_db";
+// BDK file store of wallets created before the changeset moved into the rgb-lib DB
+#[cfg(feature = "bdk_file_store_migration")]
+pub(crate) const BDK_DB_NAME: &str = "bdk_db";
+// BDK changes that have been applied in memory but whose transaction has not committed yet
+pub(crate) const BDK_PENDING_FILE: &str = "bdk_pending.json";
 
 pub(crate) const NUM_KNOWN_SCHEMAS: usize = 4;
 
@@ -64,7 +68,7 @@ impl WalletManifest {
 
     pub(crate) fn write(&self, wallet_dir: &Path) -> Result<(), Error> {
         let json = serde_json::to_string_pretty(self).map_err(InternalError::from)?;
-        fs::write(Self::path(wallet_dir), json)?;
+        atomic_write(&Self::path(wallet_dir), json.as_bytes())?;
         Ok(())
     }
 
@@ -207,8 +211,8 @@ pub struct WalletInternals {
     pub(crate) _logger_guard: AsyncGuard,
     pub(crate) database: Arc<RgbLibDatabase>,
     pub(crate) wallet_dir: PathBuf,
-    pub(crate) bdk_wallet: PersistedWallet<Store<ChangeSet>>,
-    pub(crate) bdk_database: Store<ChangeSet>,
+    pub(crate) bdk_wallet: BdkWallet,
+    pub(crate) bdk_pending: Arc<Mutex<ChangeSet>>,
     #[cfg(any(feature = "electrum", feature = "esplora"))]
     pub(crate) online_data: Option<OnlineData>,
 }
@@ -253,37 +257,124 @@ pub(crate) fn setup_db<P: AsRef<Path>>(wallet_dir: P) -> Result<RgbLibDatabase, 
     Ok(RgbLibDatabase::new(connection))
 }
 
+/// Import the BDK data of a wallet created before the changeset moved into the rgb-lib DB.
+///
+/// Such wallets keep their data in `bdk_file_store` files inside the wallet directory. Chain data
+/// could be rebuilt by a rescan, but the revealed-address indices could not: a rescan only
+/// restores up to the last *used* index, so an address that was revealed and never paid would be
+/// handed out again. The signing and watch-only wallets had a store each, so both are imported;
+/// `last_revealed` is persisted monotonically, so the higher of the two wins regardless of order.
+///
+/// A store that was read in full is removed once the import is durably committed, so the stale
+/// copy cannot be picked up again by an older rgb-lib. A truncated one is left in place, since the
+/// entries past the truncation were never imported. Keeping it costs nothing at load time: this
+/// runs only while the stored changeset is empty, and by the end of the first setup it no longer
+/// is (either the import filled it or the freshly created wallet wrote its descriptors) so a
+/// left-behind store is never read a second time.
+///
+/// Returns whether anything was imported.
+#[cfg(feature = "bdk_file_store_migration")]
+fn import_legacy_bdk_store(txn: &DbTxn, wallet_dir: &Path) -> Result<bool, Error> {
+    let mut imported = false;
+    for name in [BDK_DB_NAME.to_string(), format!("{BDK_DB_NAME}_watch_only")] {
+        let path = wallet_dir.join(name);
+        if !path.exists() {
+            continue;
+        }
+        // a truncated trailing entry still leaves the earlier ones usable, so take the partial
+        // dump rather than failing the whole import
+        let (changeset, complete) = match Store::<ChangeSet>::load(BDK_DB_NAME.as_bytes(), &path) {
+            Ok((_, changeset)) => (changeset.map(Box::new), true),
+            Err(e) => {
+                if e.changeset.is_none() {
+                    return Err(Error::Internal {
+                        details: format!("cannot read legacy BDK store {path:?}: {}", e.error),
+                    });
+                }
+                (e.changeset, false)
+            }
+        };
+        if let Some(changeset) = changeset {
+            txn.update_bdk_changeset(&changeset)?;
+            imported = true;
+        }
+        // drop the file only once its contents are durably in the DB
+        if complete {
+            txn.on_commit(move || {
+                let _ = fs::remove_file(path);
+            });
+        }
+    }
+    Ok(imported)
+}
+
+/// Without the `bdk_file_store_migration` feature there is nothing to import from.
+#[cfg(not(feature = "bdk_file_store_migration"))]
+fn import_legacy_bdk_store(_txn: &DbTxn, _wallet_dir: &Path) -> Result<bool, Error> {
+    Ok(false)
+}
+
 pub(crate) fn setup_bdk<P: AsRef<Path>>(
-    wallet_data: &WalletData,
+    txn: &DbTxn,
     wallet_dir: P,
     desc_colored: String,
     desc_vanilla: String,
     watch_only: bool,
-    bdk_network: BdkNetwork,
-) -> Result<(PersistedWallet<Store<ChangeSet>>, Store<ChangeSet>), Error> {
-    let chain_net: ChainNet = wallet_data.bitcoin_network.into();
+    bitcoin_network: BitcoinNetwork,
+) -> Result<BdkWallet, Error> {
+    let chain_net: ChainNet = bitcoin_network.into();
     let mut wallet_params = BdkWallet::load()
         .descriptor(KeychainKind::External, Some(desc_colored.clone()))
         .descriptor(KeychainKind::Internal, Some(desc_vanilla.clone()))
+        .use_spk_cache(false)
         .check_genesis_hash(BlockHash::from_byte_array(
             chain_net.chain_hash().to_bytes(),
         ));
-    let bdk_db_name = if watch_only {
-        format!("{BDK_DB_NAME}_watch_only")
-    } else {
+    if !watch_only {
         wallet_params = wallet_params.extract_keys();
-        BDK_DB_NAME.to_string()
-    };
-    let bdk_db_path = wallet_dir.as_ref().join(bdk_db_name);
-    let (mut bdk_database, _) =
-        Store::<ChangeSet>::load_or_create(BDK_DB_NAME.as_bytes(), bdk_db_path)?;
-    let bdk_wallet = match wallet_params.load_wallet(&mut bdk_database)? {
+    }
+    let mut changeset = txn.get_bdk_changeset()?;
+    // an empty changeset means either a brand-new wallet or one whose data still lives in the
+    // legacy file store
+    let mut reload = changeset.is_empty() && import_legacy_bdk_store(txn, wallet_dir.as_ref())?;
+    // a crash between the temporary write and the rename leaves the newer changeset in the .tmp
+    // file, so fold both in; the pending buffer only ever grows, so applying them in this order
+    // ends on the newest state
+    let pending_path = wallet_dir.as_ref().join(BDK_PENDING_FILE);
+    let pending_tmp_path = atomic_tmp_path(&pending_path)?;
+    for pending_file in [pending_path, pending_tmp_path] {
+        if !pending_file.exists() {
+            continue;
+        }
+        // a file that fails to parse was still being written when the crash happened, so its
+        // contents were never complete: drop it rather than refusing to open the wallet
+        if let Ok(pending) = serde_json::from_slice::<ChangeSet>(&fs::read(&pending_file)?) {
+            txn.update_bdk_changeset(&pending)?;
+            reload = true;
+        }
+        // drop the file only once its contents are durably in the DB
+        txn.on_commit(move || {
+            let _ = fs::remove_file(pending_file);
+        });
+    }
+    if reload {
+        changeset = txn.get_bdk_changeset()?;
+    }
+    let bdk_wallet = match wallet_params.load_wallet_no_persist(changeset)? {
         Some(wallet) => wallet,
-        None => BdkWallet::create(desc_colored, desc_vanilla)
-            .network(bdk_network)
-            .create_wallet(&mut bdk_database)?,
+        None => {
+            let mut wallet = BdkWallet::create(desc_colored, desc_vanilla)
+                .network(BdkNetwork::from(bitcoin_network))
+                .use_spk_cache(false)
+                .create_wallet_no_persist()
+                .map_err(InternalError::from)?;
+            if let Some(changeset) = wallet.take_staged() {
+                txn.update_bdk_changeset(&changeset)?;
+            }
+            wallet
+        }
     };
-    Ok((bdk_wallet, bdk_database))
+    Ok(bdk_wallet)
 }
 
 pub(crate) fn setup_new_wallet(
@@ -320,25 +411,76 @@ pub trait WalletCore {
 
     fn internals_mut(&mut self) -> &mut WalletInternals;
 
-    fn bdk_wallet(&self) -> &PersistedWallet<Store<ChangeSet>> {
+    fn bdk_wallet(&self) -> &BdkWallet {
         &self.internals().bdk_wallet
     }
 
-    fn bdk_wallet_mut(&mut self) -> &mut PersistedWallet<Store<ChangeSet>> {
+    fn bdk_wallet_mut(&mut self) -> &mut BdkWallet {
         &mut self.internals_mut().bdk_wallet
     }
 
-    fn bdk_wallet_db_mut(
-        &mut self,
-    ) -> (
-        &mut PersistedWallet<Store<ChangeSet>>,
-        &mut Store<ChangeSet>,
-    ) {
-        let internals_mut = self.internals_mut();
-        (
-            &mut internals_mut.bdk_wallet,
-            &mut internals_mut.bdk_database,
-        )
+    /// Persist the BDK wallet's staged changes through the given rgb-lib transaction.
+    ///
+    /// The changes are moved out of BDK's stage into `bdk_pending` and only dropped once `txn`
+    /// commits, so neither a failed write nor a rollback can lose them: the next `persist_bdk`
+    /// writes them again (the mapping is made of upserts, so re-writing is idempotent). This
+    /// mirrors [`PersistedWallet::persist`](bdk_wallet::PersistedWallet), where the persister
+    /// write is itself the commit.
+    fn persist_bdk(&mut self, txn: &DbTxn) -> Result<(), Error> {
+        let staged = self.bdk_wallet_mut().take_staged();
+        let pending = Arc::clone(&self.internals().bdk_pending);
+        {
+            let mut guard = pending.lock().expect("bdk_pending is never poisoned");
+            if let Some(staged) = staged {
+                guard.merge(staged);
+            }
+            if guard.is_empty() {
+                return Ok(());
+            }
+            txn.update_bdk_changeset(&guard)?;
+        }
+        let pending_file = self.wallet_dir().join(BDK_PENDING_FILE);
+        txn.on_commit(move || {
+            pending
+                .lock()
+                .expect("bdk_pending is never poisoned")
+                .take();
+            // the changes are in the DB now, so the crash-recovery copy is no longer needed
+            let _ = fs::remove_file(pending_file);
+        });
+        Ok(())
+    }
+
+    /// Write the pending BDK changes to disk, outside the rgb-lib transaction.
+    ///
+    /// The file is read back by [`setup_bdk`] and removed once its contents reach the DB. So is
+    /// the temporary file, in case a crash landed between the write and the rename.
+    fn flush_bdk_pending(&mut self) -> Result<(), Error> {
+        let staged = self.bdk_wallet_mut().take_staged();
+        let pending = Arc::clone(&self.internals().bdk_pending);
+        let serialized = {
+            let mut guard = pending.lock().expect("bdk_pending is never poisoned");
+            if let Some(staged) = staged {
+                guard.merge(staged);
+            }
+            if guard.is_empty() {
+                return Ok(());
+            }
+            serde_json::to_vec(&*guard).map_err(InternalError::from)?
+        };
+        // a crash mid-write cannot leave a half-written file, which would fail to parse on reload
+        // and leave the wallet unopenable
+        atomic_write(&self.wallet_dir().join(BDK_PENDING_FILE), &serialized)
+    }
+
+    /// Persist any pending BDK changes and commit the transaction.
+    ///
+    /// This is an operation's single persist point: BDK changes accumulate in memory while the
+    /// operation runs and reach the DB once, in the same commit as the rgb-lib changes they belong
+    /// to. Operations that cannot touch BDK take `&self` and commit the transaction directly.
+    fn persist_and_commit(&mut self, txn: DbTxn) -> Result<(), Error> {
+        self.persist_bdk(&txn)?;
+        txn.commit()
     }
 
     fn database(&self) -> &RgbLibDatabase {
@@ -488,13 +630,11 @@ pub trait WalletCore {
                 self.indexer().sync(request)?.into()
             }
         };
-        let (bdk_wallet, bdk_db) = self.bdk_wallet_db_mut();
-        bdk_wallet
+        self.bdk_wallet_mut()
             .apply_update(update)
             .map_err(|e| Error::FailedBdkSync {
                 details: e.to_string(),
             })?;
-        bdk_wallet.persist(bdk_db)?;
 
         if matches!(options.keychain, SyncKeychain::Colored) {
             self.update_db_colored_txos_from_bdk(txn, include_spent)?;

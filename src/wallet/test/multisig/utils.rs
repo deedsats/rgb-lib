@@ -76,9 +76,17 @@ pub(super) trait Sanitizable {
 
 // replace the variable part of file paths with a fixed string
 fn sanitize_path(path: &str) -> String {
-    regex::Regex::new(r"tmp/[^/]*")
-        .unwrap()
-        .replace(path, "tmp/variable")
+    // the test data dir holds one directory per wallet, named differently on every run: that name
+    // is the only variable part, everything below it has to be compared. The pattern is built from
+    // the data dir itself so that renaming it cannot silently stop the sanitization
+    let data_dir = join_with_sep(&TEST_DATA_DIR_PARTS);
+    let sep = regex::escape(MAIN_SEPARATOR_STR);
+    let re = regex::Regex::new(&format!("{}{sep}[^{sep}]*", regex::escape(&data_dir))).unwrap();
+    assert!(
+        re.is_match(path),
+        "cannot sanitize path outside the test data dir {data_dir}: {path}"
+    );
+    re.replace(path, format!("{data_dir}{MAIN_SEPARATOR_STR}variable"))
         .to_string()
 }
 
@@ -1618,6 +1626,10 @@ pub(super) fn operation_complete<H>(
     H: OperationHandler,
     H::Details: Sanitizable,
 {
+    // stop mining so the TX broadcast by the final sign_and_ack doesn't get confirmed
+    // before callers check the unconfirmed state
+    let _mining_guard = stop_mining();
+
     let (op, files) = if !ackers.is_empty() {
         let party = ackers.first().unwrap();
         party.get_op_and_files(op_idx)

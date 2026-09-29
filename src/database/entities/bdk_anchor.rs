@@ -7,24 +7,26 @@ pub struct Entity;
 
 impl EntityName for Entity {
     fn table_name(&self) -> &'static str {
-        "backup_info"
+        "bdk_anchor"
     }
 }
 
 #[derive(Clone, Debug, PartialEq, DeriveModel, DeriveActiveModel, Eq)]
 pub struct Model {
     pub idx: i32,
-    pub last_backup_timestamp: String,
-    pub last_operation_timestamp: String,
-    pub last_processed_operation_idx: Option<i32>,
+    pub txid: String,
+    pub block_height: u32,
+    pub block_hash: String,
+    pub confirmation_time: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveColumn)]
 pub enum Column {
     Idx,
-    LastBackupTimestamp,
-    LastOperationTimestamp,
-    LastProcessedOperationIdx,
+    Txid,
+    BlockHeight,
+    BlockHash,
+    ConfirmationTime,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DerivePrimaryKey)]
@@ -40,23 +42,37 @@ impl PrimaryKeyTrait for PrimaryKey {
 }
 
 #[derive(Copy, Clone, Debug, EnumIter)]
-pub enum Relation {}
+pub enum Relation {
+    BdkTx,
+}
 
 impl ColumnTrait for Column {
     type EntityName = Entity;
     fn def(&self) -> ColumnDef {
         match self {
             Self::Idx => ColumnType::Integer.def(),
-            Self::LastBackupTimestamp => ColumnType::String(StringLen::None).def(),
-            Self::LastOperationTimestamp => ColumnType::String(StringLen::None).def(),
-            Self::LastProcessedOperationIdx => ColumnType::Integer.def().null(),
+            Self::Txid => ColumnType::String(StringLen::None).def(),
+            Self::BlockHeight => ColumnType::BigInteger.def(),
+            Self::BlockHash => ColumnType::String(StringLen::None).def(),
+            Self::ConfirmationTime => ColumnType::String(StringLen::None).def(),
         }
     }
 }
 
 impl RelationTrait for Relation {
     fn def(&self) -> RelationDef {
-        panic!("No RelationDef")
+        match self {
+            Self::BdkTx => Entity::belongs_to(super::bdk_tx::Entity)
+                .from(Column::Txid)
+                .to(super::bdk_tx::Column::Txid)
+                .into(),
+        }
+    }
+}
+
+impl Related<super::bdk_tx::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::BdkTx.def()
     }
 }
 

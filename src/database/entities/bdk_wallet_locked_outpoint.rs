@@ -7,24 +7,22 @@ pub struct Entity;
 
 impl EntityName for Entity {
     fn table_name(&self) -> &'static str {
-        "backup_info"
+        "bdk_wallet_locked_outpoint"
     }
 }
 
 #[derive(Clone, Debug, PartialEq, DeriveModel, DeriveActiveModel, Eq)]
 pub struct Model {
     pub idx: i32,
-    pub last_backup_timestamp: String,
-    pub last_operation_timestamp: String,
-    pub last_processed_operation_idx: Option<i32>,
+    pub txid: String,
+    pub vout: u32,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveColumn)]
 pub enum Column {
     Idx,
-    LastBackupTimestamp,
-    LastOperationTimestamp,
-    LastProcessedOperationIdx,
+    Txid,
+    Vout,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DerivePrimaryKey)]
@@ -47,9 +45,8 @@ impl ColumnTrait for Column {
     fn def(&self) -> ColumnDef {
         match self {
             Self::Idx => ColumnType::Integer.def(),
-            Self::LastBackupTimestamp => ColumnType::String(StringLen::None).def(),
-            Self::LastOperationTimestamp => ColumnType::String(StringLen::None).def(),
-            Self::LastProcessedOperationIdx => ColumnType::Integer.def().null(),
+            Self::Txid => ColumnType::String(StringLen::None).def(),
+            Self::Vout => ColumnType::BigInteger.def(),
         }
     }
 }

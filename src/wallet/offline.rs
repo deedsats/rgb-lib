@@ -325,7 +325,10 @@ pub trait WalletOffline: WalletBackup {
         let src = original_file_path.as_ref().to_string_lossy().to_string();
         let dst = media.clone().file_path;
         if src != dst {
-            fs::copy(src, dst)?;
+            atomic_write_with(Path::new(&dst), |tmp| {
+                fs::copy(&src, tmp)?;
+                Ok(())
+            })?;
         }
         Ok(())
     }
@@ -401,7 +404,7 @@ pub trait WalletOffline: WalletBackup {
         let valid_contract = builder.issue_contract().expect("issuance should succeed");
         let asset_id = valid_contract.contract_id().to_string();
         let contract_path = self.get_issue_consignment_path(&asset_id);
-        valid_contract.save_file(&contract_path)?;
+        atomic_write_with(&contract_path, |tmp| Ok(valid_contract.save_file(tmp)?))?;
         Ok((asset_id, contract_path, valid_contract))
     }
 
@@ -1232,10 +1235,7 @@ pub trait WalletOffline: WalletBackup {
         keychain: KeychainKind,
         _count: u32,
     ) -> Result<BdkAddress, Error> {
-        let (bdk_wallet, bdk_db) = self.bdk_wallet_db_mut();
-        let address = bdk_wallet.reveal_next_address(keychain).address;
-        bdk_wallet.persist(bdk_db)?;
-        Ok(address)
+        Ok(self.bdk_wallet_mut().reveal_next_address(keychain).address)
     }
 
     fn get_new_address(&mut self) -> Result<BdkAddress, Error> {
@@ -2087,13 +2087,31 @@ pub trait WalletOffline: WalletBackup {
     fn list_transfers_impl(
         &self,
         txn: &DbTxn,
-        asset_id: Option<String>,
+        asset_filter: AssetFilter,
+        txid: Option<String>,
     ) -> Result<Vec<Transfer>, Error> {
         let db_data = txn.get_db_data(false)?;
+        let batch_transfer_idxs: Option<HashSet<i32>> = txid.map(|txid| {
+            db_data
+                .batch_transfers
+                .iter()
+                .filter(|b| b.txid.as_deref() == Some(txid.as_str()))
+                .map(|b| b.idx)
+                .collect()
+        });
         let asset_transfer_ids: Vec<i32> = db_data
             .asset_transfers
             .iter()
-            .filter(|t| t.asset_id == asset_id)
+            .filter(|t| match &asset_filter {
+                AssetFilter::AnyOrNone => true,
+                AssetFilter::None => t.asset_id.is_none(),
+                AssetFilter::Id(asset_id) => t.asset_id.as_ref() == Some(asset_id),
+            })
+            .filter(|t| {
+                batch_transfer_idxs
+                    .as_ref()
+                    .is_none_or(|idxs| idxs.contains(&t.batch_transfer_idx))
+            })
             .filter(|t| t.user_driven)
             .map(|t| t.idx)
             .collect();
@@ -2627,7 +2645,7 @@ pub trait WalletOffline: WalletBackup {
             let asset_transfer_dir = self.get_asset_transfer_dir(transfer_dir, asset_id);
             fs::create_dir_all(&asset_transfer_dir)?;
             let consignment_path = self.get_send_consignment_path_impl(asset_transfer_dir);
-            consignment.save_file(&consignment_path)?;
+            atomic_write_with(&consignment_path, |tmp| Ok(consignment.save_file(tmp)?))?;
         }
         Ok(())
     }
@@ -2682,7 +2700,7 @@ pub trait RgbWalletOpsOffline: WalletOffline + WalletBackup {
         info!(self.logger(), "Getting BTC balance...");
         let txn = self.database().begin_transaction()?;
         let balance = self.get_btc_balance_impl(&txn, online, skip_sync)?;
-        txn.commit()?;
+        self.persist_and_commit(txn)?;
         info!(self.logger(), "Get BTC balance completed");
         Ok(balance)
     }
@@ -2712,25 +2730,30 @@ pub trait RgbWalletOpsOffline: WalletOffline + WalletBackup {
         info!(self.logger(), "Listing transactions...");
         let txn = self.database().begin_transaction()?;
         let transactions = self.list_transactions_impl(&txn, online, skip_sync)?;
-        txn.commit()?;
+        self.persist_and_commit(txn)?;
         info!(self.logger(), "List transactions completed");
         Ok(transactions)
     }
 
     /// List the RGB [`Transfer`]s known to the wallet.
     ///
-    /// When an `asset_id` is not provided, return transfers that are not connected to a specific
-    /// asset.
-    fn list_transfers(&self, asset_id: Option<String>) -> Result<Vec<Transfer>, Error> {
+    /// `asset_filter` selects transfers by asset. When a `txid` is provided, restrict the result to the
+    /// transfers committed by the on-chain transaction with that ID; an unknown `txid` yields an
+    /// empty list.
+    fn list_transfers(
+        &self,
+        asset_filter: AssetFilter,
+        txid: Option<String>,
+    ) -> Result<Vec<Transfer>, Error> {
         info!(
             self.logger(),
-            "Listing transfers for asset '{:?}'...", asset_id
+            "Listing transfers for filter '{:?}' and txid '{:?}'...", asset_filter, txid
         );
         let txn = self.database().begin_transaction()?;
-        if let Some(asset_id) = &asset_id {
+        if let AssetFilter::Id(asset_id) = &asset_filter {
             txn.check_asset_exists(asset_id.clone())?;
         }
-        let transfers = self.list_transfers_impl(&txn, asset_id)?;
+        let transfers = self.list_transfers_impl(&txn, asset_filter, txid)?;
         txn.commit()?;
         info!(self.logger(), "List transfers completed");
         Ok(transfers)
@@ -2749,7 +2772,7 @@ pub trait RgbWalletOpsOffline: WalletOffline + WalletBackup {
         info!(self.logger(), "Listing unspents...");
         let txn = self.database().begin_transaction()?;
         let unspents = self.list_unspents_impl(&txn, online, settled_only, skip_sync)?;
-        txn.commit()?;
+        self.persist_and_commit(txn)?;
         info!(self.logger(), "List unspents completed");
         Ok(unspents)
     }
